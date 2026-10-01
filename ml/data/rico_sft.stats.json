@@ -1,0 +1,15 @@
+{
+  "raw_distilled": 0,
+  "kept_distilled": 0,
+  "dropped": {},
+  "qa_chunks": 0,
+  "qa_kept": 0,
+  "qa_dropped": {},
+  "gold_unique": 207,
+  "gold_repeat": 3,
+  "total_records": 621,
+  "sources": {
+    "style_examples": 123,
+    "identity": 498
+  }
+}
