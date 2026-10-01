@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "releaseTag": "models-v1",
+  "repo": "giumaa/rico-ai",
+  "models": [
+    {
+      "id": "rico-lite",
+      "name": {
+        "ar": "ريكو لايت",
+        "en": "Rico Lite"
+      },
+      "description": {
+        "ar": "خفيف وسريع، يشتغل على أغلب الأجهزة (٨ جيجا رام). مناسب للأسئلة اليومية والكتابة والترجمة.",
+        "en": "Light and fast; runs on most computers (8 GB RAM). Great for everyday questions, writing and translation."
+      },
+      "sizeGB": 3.4,
+      "minRamGB": 8,
+      "contextLength": 16384,
+      "maxContextLength": 262144,
+      "license": "Apache-2.0",
+      "baseModel": "Qwen/Qwen3.5-4B",
+      "packaged": false,
+      "source": {
+        "repo": "lmstudio-community/Qwen3.5-4B-GGUF",
+        "file": "Qwen3.5-4B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+        "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+        "sizeBytes": 2707513696,
+        "mmproj": {
+          "repo": "unsloth/Qwen3.5-4B-GGUF",
+          "file": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf",
+          "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+          "sizeBytes": 672423616
+        }
+      },
+      "files": [
+        {
+          "url": "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+          "fallbackUrl": null,
+          "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+          "sizeBytes": 2707513696
+        }
+      ],
+      "vision": true,
+      "mmproj": {
+        "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf",
+        "fallbackUrl": null,
+        "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+        "sizeBytes": 672423616
+      }
+    },
+    {
+      "id": "rico",
+      "name": {
+        "ar": "ريكو",
+        "en": "Rico"
+      },
+      "description": {
+        "ar": "التوازن الأفضل بين الجودة والسرعة (١٦ جيجا رام). فهم أعمق وكتابة أحسن بالعربي والإنجليزي.",
+        "en": "The best balance of quality and speed (16 GB RAM). Deeper understanding and better writing in Arabic and English."
+      },
+      "sizeGB": 7.6,
+      "minRamGB": 16,
+      "contextLength": 16384,
+      "maxContextLength": 262144,
+      "license": "Apache-2.0",
+      "baseModel": "google/gemma-4-12B-it",
+      "packaged": false,
+      "source": {
+        "repo": "lmstudio-community/gemma-4-12B-it-GGUF",
+        "file": "gemma-4-12B-it-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf",
+        "sha256": "95d83ba36642b1f385fb906b5962a71763361be3bac930a709945f72d97473f8",
+        "sizeBytes": 7381382944,
+        "mmproj": {
+          "repo": "unsloth/gemma-4-12b-it-GGUF",
+          "file": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e",
+          "sizeBytes": 175115840
+        }
+      },
+      "files": [
+        {
+          "url": "https://huggingface.co/lmstudio-community/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf",
+          "fallbackUrl": null,
+          "sha256": "95d83ba36642b1f385fb906b5962a71763361be3bac930a709945f72d97473f8",
+          "sizeBytes": 7381382944
+        }
+      ],
+      "vision": true,
+      "mmproj": {
+        "url": "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf",
+        "fallbackUrl": null,
+        "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e",
+        "sizeBytes": 175115840
+      }
+    },
+    {
+      "id": "rico-max",
+      "name": {
+        "ar": "ريكو ماكس",
+        "en": "Rico Max"
+      },
+      "description": {
+        "ar": "أعلى جودة (٣٢ جيجا رام أو أكثر). نموذج خبراء (MoE) سريع على المعالج رغم حجمه الكبير.",
+        "en": "Highest quality (32 GB RAM or more). A Mixture-of-Experts model that stays fast on CPU despite its size."
+      },
+      "sizeGB": 18.0,
+      "minRamGB": 32,
+      "contextLength": 32768,
+      "maxContextLength": 262144,
+      "license": "Apache-2.0",
+      "baseModel": "google/gemma-4-26B-A4B-it",
+      "packaged": false,
+      "source": {
+        "repo": "lmstudio-community/gemma-4-26B-A4B-it-GGUF",
+        "file": "gemma-4-26B-A4B-it-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+        "sha256": "e19514d9541344001cb7c8eaf88704b8bf2e5d8f4e9aac12402eed360cffdfc4",
+        "sizeBytes": 16796017248,
+        "mmproj": {
+          "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+          "file": "mmproj-F16.gguf",
+          "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-F16.gguf",
+          "sha256": "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
+          "sizeBytes": 1193058784
+        }
+      },
+      "files": [
+        {
+          "url": "https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+          "fallbackUrl": null,
+          "sha256": "e19514d9541344001cb7c8eaf88704b8bf2e5d8f4e9aac12402eed360cffdfc4",
+          "sizeBytes": 16796017248
+        }
+      ],
+      "vision": true,
+      "mmproj": {
+        "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-F16.gguf",
+        "fallbackUrl": null,
+        "sha256": "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
+        "sizeBytes": 1193058784
+      }
+    }
+  ]
+}

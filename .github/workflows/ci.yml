@@ -1,0 +1,66 @@
+name: CI
+
+# Cheap checks (ubuntu only): app typecheck + unit tests, and a no-model self-test of the ML pipeline scripts.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+
+  ml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install --quiet pyyaml gguf jinja2 numpy
+      - name: Compile all Python
+        run: python -m compileall -q ml
+      - name: Shell scripts syntax
+        run: for f in .github/scripts/*.sh; do bash -n "$f"; done
+      - name: Workflows + catalog are valid
+        run: |
+          python - <<'PY'
+          import glob, json, yaml
+          for f in sorted(glob.glob(".github/workflows/*.yml")):
+              yaml.safe_load(open(f, encoding="utf-8")); print("ok", f)
+          cat = json.load(open("models/catalog.json", encoding="utf-8"))
+          assert cat["version"] == 1 and {m["id"] for m in cat["models"]} >= {"rico-lite", "rico", "rico-max"}
+          for m in cat["models"]:
+              assert m["files"] and all(f["sha256"] and f["sizeBytes"] for f in m["files"]), m["id"]
+              assert m["mmproj"]["sha256"], m["id"]
+          print("catalog ok")
+          PY
+      - name: Distillation pipeline self-test (mock teacher)
+        run: python ml/distill.py selftest
+      - name: GGUF patch + template self-test (synthetic model)
+        run: python ml/package_model.py selftest

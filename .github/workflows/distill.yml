@@ -1,0 +1,244 @@
+name: Distill
+
+# Pipeline (run AFTER "Package models"):  collect recent Libya texts -> distill (up to 20 parallel jobs) -> merge.
+#
+#  collect : ml/collect_recent.py pulls openly licensed (CC BY / CC BY-SA) text revised since --since (default
+#            2026-04-01) from Arabic Wikipedia, Arabic Wikinews and English Wikipedia via the MediaWiki API and writes
+#            ml/data/recent/articles.jsonl + ATTRIBUTION.md.
+#  generate: each job runs llama.cpp `llama-server` (CPU) with the teacher and, for its slice,
+#            (a) answers prompts from ml/data/seed/prompts_ar.jsonl with the Rico persona + few-shots, and
+#            (b) reads article chunks and writes 3-5 grounded Libyan-dialect Q&A pairs (with date context).
+#            Partial results are uploaded as artifacts after every chunk, so a crash / timeout never loses everything.
+#  merge   : filters (eval/score_rules.json + built-in heuristics + grounding checks), de-duplicates, adds the gold
+#            seeds (identity + style, x3) -> ml/data/rico_sft.jsonl (+ stats) -> artifact + commit.
+#
+# Teacher: Gemma-4-12B-it Q4_K_M (Apache-2.0 + Gemma Prohibited Use Policy; outputs may be used to train other
+# models - see docs/ml.md "Licenses").  ~7.4 GB model on a 16 GB / 4 vCPU runner, 3 chunks per job.
+# Free minutes are unlimited only on PUBLIC repos - on a private repo this burns the monthly quota.
+
+on:
+  workflow_dispatch:
+    inputs:
+      collect:
+        description: "Run the recent-articles collection step (false = reuse ml/data/recent/articles.jsonl from the repo)"
+        type: boolean
+        default: true
+      since:
+        description: "Only pages whose latest revision is on/after this date (YYYY-MM-DD)"
+        default: "2026-04-01"
+      shards:
+        description: "Number of parallel generate jobs (1-20)"
+        default: "20"
+        required: true
+      samples:
+        description: "Answers per seed prompt (different seeds)"
+        default: "1"
+      qa_samples:
+        description: "Q&A generations per article chunk (different seeds)"
+        default: "2"
+      chunk_minutes:
+        description: "Minutes per chunk (3 chunks per job; keep 3 x chunk + ~25 min < 345)"
+        default: "95"
+      max_tokens:
+        description: "Max tokens per prompt answer"
+        default: "500"
+      temperature:
+        description: "Sampling temperature"
+        default: "0.7"
+      parallel:
+        description: "Concurrent requests per job (= llama-server slots)"
+        default: "6"
+      teacher_url:
+        description: "Teacher GGUF URL"
+        default: "https://huggingface.co/lmstudio-community/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf"
+      teacher_sha256:
+        description: "Teacher GGUF sha256 (empty = skip verification)"
+        default: "95d83ba36642b1f385fb906b5962a71763361be3bac930a709945f72d97473f8"
+      teacher_name:
+        description: "Label stored in the data"
+        default: "gemma-4-12B-it-Q4_K_M"
+      commit_result:
+        description: "Commit ml/data/rico_sft.jsonl (+ recent articles/attribution) to the branch"
+        type: boolean
+        default: true
+      llama_cpp_tag:
+        description: "llama.cpp release"
+        default: "b11312"
+
+permissions:
+  contents: write
+
+env:
+  LLAMA_CPP_TAG: ${{ inputs.llama_cpp_tag || 'b11312' }}
+
+jobs:
+  collect:
+    if: ${{ inputs.collect }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Collect recent Libya texts (CC BY / CC BY-SA only)
+        env:
+          SINCE: ${{ inputs.since }}
+        run: |
+          python3 ml/collect_recent.py --since "$SINCE"
+          wc -l ml/data/recent/articles.jsonl; head -n 20 ml/data/recent/ATTRIBUTION.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: recent-articles
+          path: |
+            ml/data/recent/articles.jsonl
+            ml/data/recent/ATTRIBUTION.md
+          if-no-files-found: error
+
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          n=$(( SHARDS ))
+          if [ "$n" -lt 1 ]; then n=1; fi
+          if [ "$n" -gt 20 ]; then n=20; fi
+          echo "matrix=$(jq -nc --argjson n "$n" '{shard: [range(0;$n)]}')" >> "$GITHUB_OUTPUT"
+
+  generate:
+    needs: [collect, prepare]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.collect.result == 'success' || needs.collect.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      SHARD: ${{ matrix.shard }}
+      SAMPLES: ${{ inputs.samples }}
+      QA_SAMPLES: ${{ inputs.qa_samples }}
+      MAX_TOKENS: ${{ inputs.max_tokens }}
+      TEMPERATURE: ${{ inputs.temperature }}
+      PARALLEL: ${{ inputs.parallel }}
+      CHUNK_MINUTES: ${{ inputs.chunk_minutes }}
+      TEACHER_NAME: ${{ inputs.teacher_name }}
+      CTX_PER_SLOT: "4096"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get fresh recent articles
+        if: ${{ inputs.collect }}
+        uses: actions/download-artifact@v8
+        with:
+          name: recent-articles
+          path: ml/data/recent
+
+      - name: Resolve shard count
+        env:
+          N: ${{ inputs.shards }}
+        run: |
+          n=$(( N )); [ "$n" -lt 1 ] && n=1; [ "$n" -gt 20 ] && n=20
+          echo "NUM_SHARDS=$n" >> "$GITHUB_ENV"
+          ls -la ml/data/recent 2>/dev/null || true
+
+      - name: Fetch llama.cpp ${{ env.LLAMA_CPP_TAG }} (linux x64, CPU)
+        run: |
+          mkdir -p "$RUNNER_TEMP/llama"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/llama.tgz" \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-x64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/llama.tgz" -C "$RUNNER_TEMP/llama"
+          echo "LLAMA_BIN=$RUNNER_TEMP/llama/llama-${LLAMA_CPP_TAG}" >> "$GITHUB_ENV"
+
+      - name: Download teacher model
+        env:
+          TEACHER_URL: ${{ inputs.teacher_url }}
+          TEACHER_SHA: ${{ inputs.teacher_sha256 }}
+        run: |
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors -C - -o "$RUNNER_TEMP/teacher.gguf" "$TEACHER_URL"
+          ls -la "$RUNNER_TEMP/teacher.gguf"
+          if [ -n "$TEACHER_SHA" ]; then echo "$TEACHER_SHA  $RUNNER_TEMP/teacher.gguf" | sha256sum -c -; fi
+          echo "TEACHER_GGUF=$RUNNER_TEMP/teacher.gguf" >> "$GITHUB_ENV"
+
+      - name: Generate - chunk 1
+        continue-on-error: true
+        run: bash .github/scripts/run_chunk.sh
+      - name: Checkpoint 1
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: distill-shard-${{ matrix.shard }}
+          path: work/shard-${{ matrix.shard }}.jsonl
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Generate - chunk 2
+        continue-on-error: true
+        run: bash .github/scripts/run_chunk.sh
+      - name: Checkpoint 2
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: distill-shard-${{ matrix.shard }}
+          path: work/shard-${{ matrix.shard }}.jsonl
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Generate - chunk 3
+        continue-on-error: true
+        run: bash .github/scripts/run_chunk.sh
+      - name: Final checkpoint
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: distill-shard-${{ matrix.shard }}
+          path: work/shard-${{ matrix.shard }}.jsonl
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Server log (tail)
+        if: always()
+        run: tail -n 30 "$RUNNER_TEMP/llama-server.log" || true
+
+  merge:
+    needs: generate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Get fresh recent articles + attribution
+        if: ${{ inputs.collect }}
+        uses: actions/download-artifact@v8
+        with:
+          name: recent-articles
+          path: ml/data/recent
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: distill-shard-*
+          path: shards
+      - name: Merge, filter, dedup, add gold seeds (x3)
+        run: |
+          find shards -name '*.jsonl' | head -n 50
+          python3 ml/distill.py merge --shards-dir shards --out ml/data/rico_sft.jsonl --gold-repeat 3
+          cat ml/data/rico_sft.stats.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rico-sft
+          path: |
+            ml/data/rico_sft.jsonl
+            ml/data/rico_sft.stats.json
+            ml/data/recent/ATTRIBUTION.md
+      - name: Commit dataset (+ recent articles & attribution)
+        if: ${{ inputs.commit_result }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ml/data/rico_sft.jsonl ml/data/rico_sft.stats.json
+          if [ -d ml/data/recent ]; then git add ml/data/recent; fi
+          if git diff --cached --quiet; then echo "dataset unchanged"; exit 0; fi
+          git commit -m "data: refresh rico_sft.jsonl (self-distillation + recent Libya Q&A) [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"

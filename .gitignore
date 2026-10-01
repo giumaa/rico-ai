@@ -1,0 +1,17 @@
+﻿node_modules/
+dist/
+out/
+release/
+*.gguf
+ml/.venv/
+ml/work/
+ml/outputs/
+__pycache__/
+.DS_Store
+
+app/resources/bin/
+*.part
+.env
+.env.*
+kaggle.json
+docs/screenshots/*.tmp

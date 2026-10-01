@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      No CSP <meta> here on purpose: the Content-Security-Policy is sent as an HTTP header by the main
+      process (src/main/security.ts), where it can differ between dev (Vite HMR) and production.
+      The renderer needs: script-src 'self'; font-src 'self'; img-src 'self' data: (grain texture);
+      style-src 'self' (React sets inline styles via the CSSOM, which CSP does not block).
+    -->
+    <meta name="color-scheme" content="dark light" />
+    <title>ريكو · Rico</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

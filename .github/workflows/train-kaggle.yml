@@ -1,0 +1,112 @@
+name: Train on Kaggle
+
+# GitHub-orchestrated alternative to training on your own PC: pushes ml/kaggle/rico-train.ipynb to Kaggle (free T4 GPU),
+# later fetches the result (Q4_K_M shards + mmproj + catalog patch), uploads them to the models-v1 release and
+# commits the catalog. GitHub's own runners have no GPU and a 6 h limit, so the TRAINING itself runs on Kaggle.
+#
+# One-time setup: create a Kaggle account, phone-verify it (needed for GPU + internet), create an API token
+# (Account -> Create New Token) and add repo secrets KAGGLE_USERNAME and KAGGLE_KEY.
+#
+#   action=push   -> starts the Kaggle run (takes ~3-7 h) and prints the kernel URL
+#   action=status -> prints the Kaggle run state
+#   action=fetch  -> when the run is complete: download output, upload to the release, update models/catalog.json
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "push | status | fetch"
+        default: "push"
+        required: true
+      preset:
+        description: "Training preset (see ml/train_lora.py PRESETS)"
+        default: "qwen35-4b"
+      epochs:
+        description: "Epochs"
+        default: "2"
+      release_tag:
+        description: "Release that hosts the model shards"
+        default: "models-v1"
+
+permissions:
+  contents: write
+
+env:
+  KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+  KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+  KERNEL_SLUG: rico-lora-train
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  kaggle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet kaggle gguf jinja2
+      - name: Check secrets
+        run: |
+          if [ -z "$KAGGLE_USERNAME" ] || [ -z "$KAGGLE_KEY" ]; then echo "::error::add KAGGLE_USERNAME / KAGGLE_KEY repo secrets"; exit 1; fi
+
+      - name: Push notebook to Kaggle
+        if: ${{ inputs.action == 'push' }}
+        env:
+          PRESET: ${{ inputs.preset }}
+          EPOCHS: ${{ inputs.epochs }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          mkdir kernel
+          python - <<'PY'
+          import json, os, re
+          nb = json.load(open("ml/kaggle/rico-train.ipynb", encoding="utf-8"))
+          for c in nb["cells"]:
+              src = "".join(c["source"])
+              if c["cell_type"] == "code" and src.lstrip().startswith("# ---- parameters"):
+                  src = re.sub(r'(?m)^PRESET\s*=.*$', 'PRESET      = "%s"' % os.environ["PRESET"], src)
+                  src = re.sub(r'(?m)^EPOCHS\s*=.*$', 'EPOCHS      = %s' % os.environ["EPOCHS"], src)
+                  src = re.sub(r'(?m)^BRANCH\s*=.*$', 'BRANCH      = "%s"' % os.environ["BRANCH"], src)
+                  src = re.sub(r'(?m)^REPO_URL\s*=.*$', 'REPO_URL    = "https://github.com/%s"' % os.environ["GH_REPO"], src)
+                  c["source"] = src.splitlines(keepends=True)
+          json.dump(nb, open("kernel/rico-train.ipynb", "w", encoding="utf-8"))
+          meta = {"id": f"{os.environ['KAGGLE_USERNAME']}/{os.environ['KERNEL_SLUG']}", "title": os.environ["KERNEL_SLUG"],
+                  "code_file": "rico-train.ipynb", "language": "python", "kernel_type": "notebook",
+                  "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
+                  "dataset_sources": [], "competition_sources": [], "kernel_sources": []}
+          json.dump(meta, open("kernel/kernel-metadata.json", "w"), indent=2)
+          PY
+          kaggle kernels push -p kernel
+          echo "Started: https://www.kaggle.com/code/${KAGGLE_USERNAME}/${KERNEL_SLUG}  (run 'status' / 'fetch' later)"
+
+      - name: Kaggle run status
+        if: ${{ inputs.action == 'status' || inputs.action == 'fetch' }}
+        run: |
+          kaggle kernels status "${KAGGLE_USERNAME}/${KERNEL_SLUG}" | tee status.txt
+          if [ "${{ inputs.action }}" = "fetch" ] && ! grep -qi "complete" status.txt; then
+            echo "::error::Kaggle run is not complete yet"; exit 1
+          fi
+
+      - name: Download Kaggle output
+        if: ${{ inputs.action == 'fetch' }}
+        run: |
+          kaggle kernels output "${KAGGLE_USERNAME}/${KERNEL_SLUG}" -p kaggle_out
+          find kaggle_out -name '*.gguf' -o -name 'catalog-patch-*.json' | head -30
+
+      - name: Upload shards + mmproj to release, update catalog
+        if: ${{ inputs.action == 'fetch' }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          rel=$(dirname "$(find kaggle_out -name 'catalog-patch-*.json' | head -n1)")
+          test -d "$rel" || { echo "::error::no release dir found in Kaggle output"; exit 1; }
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --latest=false \
+            --title "Rico models ($RELEASE_TAG)" --notes "Model shards for the Rico app (see docs/ml.md)"
+          gh release upload "$RELEASE_TAG" "$rel"/*.gguf --clobber
+          python ml/package_model.py merge-catalog --patch-dir "$rel"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/catalog.json
+          git diff --cached --quiet || { git commit -m "chore(models): fine-tuned rico-lite from Kaggle [skip ci]"; git pull --rebase origin "${{ github.ref_name }}"; git push origin "HEAD:${{ github.ref_name }}"; }

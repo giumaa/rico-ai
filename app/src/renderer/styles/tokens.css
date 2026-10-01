@@ -1,0 +1,209 @@
+/*
+ * Design tokens — "Libyan desert night".
+ * ink black + saffron gold + ember, date-palm green as a rare accent. No purple, no blue.
+ * Palette values come from SPEC.md; derived tokens are noted inline.
+ *
+ * Theme is selected by <html data-theme="dark|light"> (set by useTheme).
+ * Before JS runs, the OS preference is honoured by the media query at the bottom.
+ */
+
+:root {
+  /* ---- theme-independent ------------------------------------------------ */
+  --font-scale: 1;
+
+  /* Latin first (Merienda, size-adjusted), Arabic falls through to Aref Ruqaa */
+  --font-text: 'Merienda', 'Aref Ruqaa', 'Segoe UI', 'Noto Naskh Arabic', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+  /* type scale — rem so the user's font-size setting scales everything */
+  --fs-xs: 0.8125rem; /* 13px */
+  --fs-sm: 0.9375rem; /* 15px */
+  --fs-ui: 1.0625rem; /* 17px */
+  --fs-body: 1.25rem; /* 20px — Aref Ruqaa reading size (Merienda is size-adjusted down to match) */
+  --fs-lg: 1.3125rem;
+  --fs-xl: 1.625rem;
+  --fs-hero: 2.875rem;
+  --fs-code: 0.875rem;
+
+  --lh-body: 1.95; /* Arabic reading line-height */
+  --lh-body-latin: 1.75;
+  --lh-ui: 1.5;
+  --lh-tight: 1.3;
+
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-pill: 999px;
+
+  --sidebar-w: 292px;
+  --col-w: 760px;
+  --header-h: 56px;
+
+  /*
+   * Space reserved for native window chrome drawn over the page:
+   *  - Windows: the title-bar overlay (min/max/close) at the physical RIGHT. Chromium exposes the free
+   *    area through env(titlebar-area-*); the overlay is whatever remains.
+   *  - macOS: traffic lights at the physical LEFT (hiddenInset) → fixed width, see data-platform below.
+   * In a plain browser / Linux frame both are 0.
+   */
+  --tb-left: 0px;
+  --tb-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+
+  --z-sidebar: 20;
+  --z-menu: 60;
+  --z-modal: 70;
+  --z-toast: 90;
+
+  /* primary button: always bright saffron→ember with ink text (contrast ≥ 5.8:1 on both ends) */
+  --btn-from: #f2b33d;
+  --btn-to: #e8742c;
+  --btn-fg: #1a1208;
+}
+
+/* =========================== DARK (default) =============================== */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0f0d0b;
+  --surface: #1a1714;
+  --surface-2: #24201c;
+  --surface-3: #2d2822; /* hover / pressed */
+  --border: #2e2924;
+  --border-strong: #433b33;
+
+  --text: #f3ece2;
+  --text-2: #d3c8b8;
+  --muted: #a89c8c;
+
+  --accent: #f2b33d; /* saffron */
+  --accent-strong: #e8742c; /* ember */
+  --accent-text: #f2b33d; /* accent used as TEXT (AA on bg) */
+  --accent-soft: rgb(242 179 61 / 0.12);
+  --accent-soft-2: rgb(242 179 61 / 0.2);
+  --ring: #f2b33d;
+
+  --green: #7fa650;
+  --green-soft: rgb(127 166 80 / 0.14);
+  --danger: #e5484d;
+  --danger-soft: rgb(229 72 77 / 0.14);
+
+  --user-bubble: #25201b;
+  --user-bubble-border: #342d26;
+  --scrim: rgb(6 5 4 / 0.66);
+  --glass: rgb(26 23 20 / 0.82);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 8px 24px -8px rgb(0 0 0 / 0.55), 0 2px 6px rgb(0 0 0 / 0.35);
+  --shadow-lg: 0 24px 64px -16px rgb(0 0 0 / 0.7), 0 4px 16px rgb(0 0 0 / 0.4);
+
+  --glow-a: rgb(242 179 61 / 0.14);
+  --glow-b: rgb(232 116 44 / 0.1);
+  --grain-opacity: 0.07;
+
+  /* code */
+  --code-bg: #12100e;
+  --code-head: #1b1815;
+  --hl-text: #e8dfd1;
+  --hl-comment: #8f8373;
+  --hl-keyword: #e8742c;
+  --hl-string: #9cc56c;
+  --hl-number: #f2b33d;
+  --hl-title: #ffd66e;
+  --hl-type: #e6ab7e;
+  --hl-attr: #d9c7a9;
+  --hl-tag: #f09a5c;
+  --hl-meta: #c98a5a;
+  --hl-regexp: #e58a6b;
+  --hl-add: #9cc56c;
+  --hl-del: #e5484d;
+}
+
+/* =========================== LIGHT (parchment) ============================ */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f7f1e6;
+  --surface: #fffbf4;
+  --surface-2: #efe6d6;
+  --surface-3: #e6dbc6;
+  --border: #e2d6c2;
+  --border-strong: #cbbda3;
+
+  --text: #1c1714;
+  --text-2: #3d342b;
+  --muted: #6e6254;
+
+  --accent: #c9821f;
+  --accent-strong: #c2541a;
+  --accent-text: #a8470f; /* darker ember for text: 5.6:1 on parchment */
+  --accent-soft: rgb(201 130 31 / 0.12);
+  --accent-soft-2: rgb(201 130 31 / 0.2);
+  --ring: #c2541a; /* 4.2:1 vs bg */
+
+  --green: #4f6b2f;
+  --green-soft: rgb(79 107 47 / 0.12);
+  --danger: #c93c3f;
+  --danger-soft: rgb(201 60 63 / 0.1);
+
+  --user-bubble: #efe6d6;
+  --user-bubble-border: #e2d6c2;
+  --scrim: rgb(40 28 14 / 0.42);
+  --glass: rgb(255 251 244 / 0.86);
+
+  --shadow-sm: 0 1px 2px rgb(60 40 10 / 0.1);
+  --shadow-md: 0 8px 24px -8px rgb(60 40 10 / 0.22), 0 2px 6px rgb(60 40 10 / 0.08);
+  --shadow-lg: 0 24px 64px -16px rgb(60 40 10 / 0.32), 0 4px 16px rgb(60 40 10 / 0.1);
+
+  --glow-a: rgb(242 179 61 / 0.22);
+  --glow-b: rgb(232 116 44 / 0.12);
+  --grain-opacity: 0.05;
+
+  --code-bg: #f3ead9;
+  --code-head: #ebe0cb;
+  --hl-text: #2b241d;
+  --hl-comment: #6e6254;
+  --hl-keyword: #b24410;
+  --hl-string: #4a6a26;
+  --hl-number: #8a5400;
+  --hl-title: #7a4a00;
+  --hl-type: #8a4a26;
+  --hl-attr: #5a4733;
+  --hl-tag: #a8470f;
+  --hl-meta: #9a4a14;
+  --hl-regexp: #a8452e;
+  --hl-add: #4a6a26;
+  --hl-del: #b3282c;
+}
+
+/* No data-theme yet (first frame, before JS): follow the OS. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+
+    --bg: #f7f1e6;
+    --surface: #fffbf4;
+    --surface-2: #efe6d6;
+    --surface-3: #e6dbc6;
+    --border: #e2d6c2;
+    --border-strong: #cbbda3;
+    --text: #1c1714;
+    --text-2: #3d342b;
+    --muted: #6e6254;
+    --accent: #c9821f;
+    --accent-strong: #c2541a;
+    --accent-text: #a8470f;
+    --ring: #c2541a;
+    --user-bubble: #efe6d6;
+    --user-bubble-border: #e2d6c2;
+    --code-bg: #f3ead9;
+    --code-head: #ebe0cb;
+  }
+}

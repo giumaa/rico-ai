@@ -1,0 +1,314 @@
+/* Onboarding + model manager (shared panel). */
+
+/* ---- full-screen onboarding ----------------------------------------------- */
+.onb {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  overflow-y: auto;
+  background: var(--bg);
+  isolation: isolate;
+  animation: fade-in 0.4s var(--ease);
+}
+.onb::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(52% 40% at 50% 0%, var(--glow-a), transparent 72%),
+    radial-gradient(40% 34% at 15% 100%, var(--glow-b), transparent 70%),
+    radial-gradient(34% 30% at 92% 70%, var(--glow-b), transparent 70%);
+  pointer-events: none;
+}
+.onb-inner {
+  width: 100%;
+  max-width: 960px;
+  margin-inline: auto;
+  padding: 40px 32px 56px;
+}
+.onb-top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.onb-hero {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+  margin-bottom: 28px;
+}
+.onb-hero .hero-mark {
+  margin-bottom: 0;
+}
+.onb-title {
+  font-size: 3.1rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.onb-title b {
+  background: linear-gradient(135deg, var(--accent-text) 10%, var(--accent-strong) 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.onb-sub {
+  max-width: 44ch;
+  font-size: var(--fs-lg);
+  line-height: 1.85;
+  color: var(--muted);
+}
+
+.models-panel {
+  container-type: inline-size;
+}
+.promises {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 30px;
+}
+.promise {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  border: 1px solid var(--border);
+  font-size: var(--fs-ui);
+  line-height: 1.7;
+  font-weight: 500;
+  backdrop-filter: blur(6px);
+}
+.promise-ico {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  background: var(--green-soft);
+  color: var(--green);
+}
+.promise-ico svg {
+  width: 18px;
+  height: 18px;
+}
+
+.onb-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+}
+.onb-section-title small {
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* ---- model cards ---------------------------------------------------------- */
+.mdl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 14px;
+}
+.mdl {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 18px 18px;
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--border);
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+.mdl:hover {
+  border-color: var(--border-strong);
+}
+.mdl[data-recommended='true'] {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+    0 18px 44px -22px rgb(232 116 44 / 0.5);
+}
+.mdl[data-active='true'] {
+  border-color: color-mix(in srgb, var(--green) 65%, var(--border));
+}
+.mdl-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+}
+.mdl-name {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  line-height: 1.4;
+}
+.mdl-desc {
+  font-size: var(--fs-sm);
+  line-height: 1.8;
+  color: var(--muted);
+  flex: 1;
+}
+.mdl-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mdl-ram {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  font-size: var(--fs-ui);
+  font-weight: 700;
+  line-height: 1.7;
+  color: var(--text);
+}
+.mdl-ram svg {
+  width: 18px;
+  height: 18px;
+  margin-top: 5px;
+  color: var(--accent-text);
+}
+.mdl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.mdl-actions .btn-primary,
+.mdl-actions .btn-secondary {
+  flex: 1;
+}
+
+/* download progress */
+.dl {
+  display: grid;
+  gap: 8px;
+}
+.dl-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.dl-row b {
+  color: var(--text);
+  font-weight: 700;
+}
+.dl-pct {
+  font-family: var(--font-mono);
+}
+.dl-verify {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.dl-verify svg {
+  width: 17px;
+  height: 17px;
+  color: var(--accent-text);
+}
+.dl-error {
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  color: var(--danger);
+}
+
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 16px 18px;
+  border-radius: var(--r-lg);
+  border: 1.5px dashed var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+.import-ico {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.import-ico svg {
+  width: 21px;
+  height: 21px;
+}
+.import-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.7;
+}
+.import-text b {
+  display: block;
+  font-size: var(--fs-ui);
+}
+.import-text span {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.net-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  font-size: var(--fs-sm);
+  line-height: 1.8;
+  color: var(--muted);
+}
+.net-note svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent-text);
+}
+
+.onb-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 860px) {
+  .onb-title {
+    font-size: 2.4rem;
+  }
+  .onb-inner {
+    padding-inline: 20px;
+  }
+}
+
+.onb-section-spaced {
+  margin-top: 24px;
+}
+
+@media (max-width: 860px) {
+  .promises {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

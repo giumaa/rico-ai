@@ -1,0 +1,55 @@
+{
+  "name": "rico",
+  "productName": "Rico",
+  "version": "0.1.0",
+  "description": "Rico (ريكو) — a fully offline AI assistant. Developed and trained by Juma Abouras.",
+  "author": "Juma Abouras",
+  "homepage": "https://github.com/rico-ai/rico-ai",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "fetch:llama": "node scripts/fetch-llama-server.mjs",
+    "fetch:llama:all": "node scripts/fetch-llama-server.mjs --platform all",
+    "dist:win": "node scripts/fetch-llama-server.mjs --platform win-x64 && npm run build && electron-builder --win --x64 --config electron-builder.yml",
+    "dist:mac": "node scripts/fetch-llama-server.mjs --platform mac-arm64 && node scripts/fetch-llama-server.mjs --platform mac-x64 && npm run build && electron-builder --mac --config electron-builder.yml",
+    "dist:linux": "node scripts/fetch-llama-server.mjs --platform linux-x64 && npm run build && electron-builder --linux --config electron-builder.yml"
+  },
+  "dependencies": {
+    "node-llama-cpp": "^3.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "clsx": "^2.1.1",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "highlight.js": "^11.12.0",
+    "lucide-react": "^1.49.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.3"
+  },
+  "overrides": {
+    "@node-llama-cpp/win-x64-cuda": "npm:clsx@2.1.1",
+    "@node-llama-cpp/win-x64-cuda-ext": "npm:clsx@2.1.1",
+    "@node-llama-cpp/linux-x64-cuda": "npm:clsx@2.1.1",
+    "@node-llama-cpp/linux-x64-cuda-ext": "npm:clsx@2.1.1"
+  }
+}

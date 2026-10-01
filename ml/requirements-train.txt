@@ -1,0 +1,17 @@
+# Core training stack for ml/train_lora.py (installed by ml/setup_local.ps1 AFTER torch).
+# torch itself is installed separately from the CUDA wheel index (see setup_local.ps1).
+# Pins follow Unsloth's constraints (transformers <= 5.5, datasets < 4.4, torch < 2.13);
+# Qwen3.5 needs transformers >= 5.2.
+transformers>=5.2,<=5.5.0
+peft>=0.18.0
+accelerate>=0.34.1
+datasets>=3.4.1,<4.4.0
+bitsandbytes>=0.45.5,!=0.46.0,!=0.48.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+protobuf
+huggingface_hub>=0.34.0
+numpy
+psutil
+gguf>=0.17.0
+jinja2

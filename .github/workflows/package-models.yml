@@ -1,0 +1,159 @@
+name: Package models
+
+# Downloads the upstream Q4_K_M GGUF of each tier (models/catalog.json -> source), stamps it with Rico metadata
+# (general.name / general.author + persona as default system prompt in the chat template), splits it into
+# <=1900 MB shards, copies the (unmodified) vision projector `<tier>-mmproj-F16.gguf`, uploads both to the `models-v1` release and commits the real shard names/sizes/sha256
+# back into models/catalog.json.   NOTE: the repo must be PUBLIC for end users to download release assets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tiers:
+        description: "Comma separated tiers to package"
+        default: "rico-lite,rico,rico-max"
+        required: true
+      release_tag:
+        description: "Release tag that hosts the model shards"
+        default: "models-v1"
+        required: true
+      commit_catalog:
+        description: "Commit the updated models/catalog.json to the default branch"
+        type: boolean
+        default: true
+      skip_server_check:
+        description: "Skip the llama-server /apply-template smoke test"
+        type: boolean
+        default: false
+      llama_cpp_tag:
+        description: "llama.cpp release used for llama-gguf-split / llama-server"
+        default: "b11312"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-models
+  cancel-in-progress: false
+
+env:
+  LLAMA_CPP_TAG: ${{ inputs.llama_cpp_tag || 'b11312' }}
+  RELEASE_TAG: ${{ inputs.release_tag || 'models-v1' }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: m
+        name: Build tier matrix
+        env:
+          TIERS: ${{ inputs.tiers }}
+        run: |
+          matrix=$(jq -nc --arg t "$TIERS" '{tier: ($t | split(",") | map(gsub("\\s";"")) | map(select(test("^[a-z0-9-]+$"))))}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+      - name: Ensure release ${{ env.RELEASE_TAG }} exists
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release exists"
+          else
+            gh release create "$RELEASE_TAG" --target "${{ github.sha }}" --latest=false \
+              --title "Rico models (${RELEASE_TAG})" \
+              --notes "GGUF model shards for the Rico desktop app (see docs/ml.md). Assets are produced by the 'Package models' workflow. Do not download manually - the app does it."
+          fi
+
+  package:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: bash .github/scripts/free_disk.sh
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: python -m pip install --quiet gguf jinja2
+
+      - name: Fetch llama.cpp ${{ env.LLAMA_CPP_TAG }} (linux x64, CPU)
+        run: |
+          mkdir -p "$RUNNER_TEMP/llama"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/llama.tgz" \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-x64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/llama.tgz" -C "$RUNNER_TEMP/llama"
+          echo "LLAMA_BIN=$RUNNER_TEMP/llama/llama-${LLAMA_CPP_TAG}" >> "$GITHUB_ENV"
+          ls "$RUNNER_TEMP/llama/llama-${LLAMA_CPP_TAG}" | grep -E "gguf-split|llama-server|llama-quantize"
+
+      - name: Package ${{ matrix.tier }} (download -> patch -> split -> sha256)
+        run: |
+          mkdir -p "$HOME/rico-work" "$HOME/rico-out"
+          python ml/package_model.py run --tier "${{ matrix.tier }}" \
+            --work "$HOME/rico-work" --out-dir "$HOME/rico-out" \
+            --llama-bin "$LLAMA_BIN" --repo "${{ github.repository }}" --release-tag "$RELEASE_TAG"
+          ls -la "$HOME/rico-out"; df -h / | tail -1
+
+      - name: Smoke test - llama.cpp renders the patched template + loads the vision projector
+        if: ${{ !inputs.skip_server_check }}
+        timeout-minutes: 25
+        run: |
+          first=$(ls "$HOME/rico-out/${{ matrix.tier }}-Q4_K_M-00001-of-"*.gguf | head -n1)
+          python ml/package_model.py server-check --gguf "$first" --llama-bin "$LLAMA_BIN" --timeout 1200             --mmproj "$HOME/rico-out/${{ matrix.tier }}-mmproj-F16.gguf"
+
+      - name: Upload shards to release ${{ env.RELEASE_TAG }}
+        run: |
+          shopt -s nullglob
+          files=("$HOME/rico-out/${{ matrix.tier }}-Q4_K_M-"*.gguf "$HOME/rico-out/${{ matrix.tier }}-mmproj-F16.gguf")
+          printf '%s\n' "${files[@]##*/}" | sort > "$RUNNER_TEMP/new_assets.txt"
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          # delete stale shards of this tier (e.g. an older split with a different shard count)
+          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | grep "^${{ matrix.tier }}-Q4_K_M-" | sort > "$RUNNER_TEMP/all_assets.txt" || true
+          comm -13 "$RUNNER_TEMP/new_assets.txt" "$RUNNER_TEMP/all_assets.txt" | while read -r old; do
+            echo "deleting stale asset $old"; gh release delete-asset "$RELEASE_TAG" "$old" -y
+          done
+
+      - name: Upload catalog patch artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: catalog-patch-${{ matrix.tier }}
+          path: ~/rico-out/catalog-patch-${{ matrix.tier }}.json
+          if-no-files-found: error
+
+  update-catalog:
+    needs: package
+    if: ${{ inputs.commit_catalog }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: catalog-patch-*
+          path: patches
+          merge-multiple: true
+      - name: Merge patches into models/catalog.json
+        run: python3 ml/package_model.py merge-catalog --patch-dir patches
+      - name: Commit catalog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- models/catalog.json; then echo "catalog unchanged"; exit 0; fi
+          git add models/catalog.json
+          git commit -m "chore(models): update catalog with packaged shards [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: catalog-json
+          path: models/catalog.json

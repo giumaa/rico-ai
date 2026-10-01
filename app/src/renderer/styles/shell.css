@@ -1,0 +1,167 @@
+/* App shell: ambient background, grid (sidebar + main), header. */
+
+.app {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr); /* without this the row grows with the chat and pushes the composer off-screen */
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  transition: grid-template-columns var(--dur) var(--ease);
+}
+.app[data-sidebar='closed'] {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+/* ---- ambient background: saffron→ember glow + a whisper of grain ---------- */
+.app-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 46% at 50% -8%, var(--glow-a), transparent 72%),
+    radial-gradient(42% 38% at 88% 108%, var(--glow-b), transparent 70%);
+}
+.app-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n' x='0' y='0'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* ---- Main column ---------------------------------------------------------- */
+.main {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+
+.main-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--header-h);
+  /* spans the full window width by default → clear the native window chrome on both physical edges */
+  padding-block: 0;
+  padding-left: calc(12px + var(--tb-left));
+  padding-right: calc(12px + var(--tb-right));
+  flex-shrink: 0;
+}
+/* with the sidebar open (wide windows) main only touches the edge opposite to the sidebar */
+@media (min-width: 881px) {
+  :root[dir='ltr'] .app[data-sidebar='open'] .main-header {
+    padding-left: 12px;
+  }
+  :root[dir='rtl'] .app[data-sidebar='open'] .main-header {
+    padding-right: 12px;
+  }
+}
+:root[data-platform='mac'] {
+  --tb-left: 84px;
+  --tb-right: 0px;
+}
+.main-title {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 8px;
+  font-size: var(--fs-ui);
+  font-weight: 700;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: var(--fs-lg);
+  color: var(--text);
+}
+
+/* model status pill (opens Settings → Models) */
+.model-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+.model-pill:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+.model-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.status-dot[data-state='ready'] {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-soft);
+}
+.status-dot[data-state='loading'] {
+  background: var(--accent);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+.status-dot[data-state='error'] {
+  background: var(--danger);
+}
+@keyframes pulse-dot {
+  50% {
+    box-shadow: 0 0 0 5px var(--accent-soft);
+    opacity: 0.7;
+  }
+}
+
+/* ---- narrow windows (≥900px is the supported minimum; below = drawer) ---- */
+.sb-scrim {
+  display: none;
+}
+@media (max-width: 880px) {
+  /* the sidebar is position:fixed here (out of grid flow), so main is the only grid item */
+  .app,
+  .app[data-sidebar='closed'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sb-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-sidebar) - 1);
+    background: var(--scrim);
+    animation: fade-in var(--dur) var(--ease);
+  }
+  .app[data-sidebar='closed'] .sb-scrim {
+    display: none;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}

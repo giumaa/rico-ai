@@ -1,0 +1,112 @@
+# electron-builder configuration for Rico.
+# Build:  npm run dist:win | dist:mac | dist:linux   (run `npm run build` first — the dist:* scripts do it for you)
+# Output: app/release/
+
+appId: com.juma.rico
+productName: Rico
+copyright: Copyright © Juma Abouras
+
+directories:
+  output: release
+  buildResources: resources/icons
+
+# Packaged app contents: the electron-vite output plus production node_modules (only node-llama-cpp and its
+# dependencies — React & co. are devDependencies, bundled into out/renderer by Vite).
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+  # Platform binaries that can never run on the target (win-arm64 is installed on some x64 hosts by npm).
+  - '!node_modules/@node-llama-cpp/win-arm64/**'
+  # CUDA prebuilts are intentionally NOT shipped (see "overrides" in package.json): Vulkan + CPU keep the installer small.
+  - '!node_modules/@node-llama-cpp/*-cuda/**'
+  - '!node_modules/@node-llama-cpp/*-cuda-ext/**'
+
+asar: true
+# Native addons + GPU libraries must live on the real file system.
+asarUnpack:
+  - node_modules/node-llama-cpp/**
+  - node_modules/@node-llama-cpp/**
+
+# Only Arabic + English UI strings from Chromium (saves ~40 MB).
+electronLanguages:
+  - ar
+  - en-US
+
+extraResources:
+  # Persona (system prompt, few-shots, dialect overrides): read at runtime from <resources>/persona
+  - from: resources/persona
+    to: persona
+    filter: ['**/*']
+  # Model catalog: read at runtime from <resources>/catalog.json
+  - from: ../models/catalog.json
+    to: catalog.json
+  # llama-server sidecar (vision + text inference): <resources>/bin/<os>-<arch>/<variant>/llama-server[.exe]
+  # Created by scripts/fetch-llama-server.mjs (run `npm run fetch:llama` / the dist:* scripts before packaging).
+  - from: resources/bin/${os}-${arch}
+    to: bin/${os}-${arch}
+    filter: ['**/*']
+
+# No updater, no publishing, no telemetry: nothing is ever uploaded or checked.
+publish: null
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icons/icon.ico
+  artifactName: Rico-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false # per-user install: no admin rights needed
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  multiLanguageInstaller: true
+  installerLanguages:
+    - ar_SA
+    - en_US
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Rico
+  deleteAppDataOnUninstall: false # chats + downloaded models are the user's; never delete them silently
+  differentialPackage: false
+  installerIcon: resources/icons/icon.ico
+  uninstallerIcon: resources/icons/icon.ico
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  icon: resources/icons/icon.icns
+  category: public.app-category.productivity
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  artifactName: Rico-${version}-mac-${arch}.${ext}
+
+dmg:
+  title: Rico ${version}
+  sign: false
+
+linux:
+  target:
+    - AppImage
+    - deb
+  icon: resources/icons/icon-512.png
+  category: Utility
+  maintainer: Juma Abouras <rico@users.noreply.github.com>
+  synopsis: Rico — fully offline AI assistant
+  description: Rico (ريكو) is an offline AI assistant that runs entirely on your computer. No account, no internet, no tracking.
+  artifactName: Rico-${version}-linux-${arch}.${ext}
+  desktop:
+    entry:
+      Name: Rico
+      Comment: Offline AI assistant
+      StartupWMClass: Rico
+      Categories: Utility;
+
+appImage:
+  artifactName: Rico-${version}-linux-${arch}.${ext}
+
+deb:
+  artifactName: rico_${version}_${arch}.${ext}

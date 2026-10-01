@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Rico">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#221C17"/><stop offset="1" stop-color="#0F0D0B"/></linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.44" r="0.55">
+      <stop offset="0" stop-color="#F2B33D" stop-opacity="0.26"/><stop offset="0.55" stop-color="#E8742C" stop-opacity="0.10"/><stop offset="1" stop-color="#E8742C" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F2B33D" stop-opacity="0.5"/><stop offset="0.5" stop-color="#F2B33D" stop-opacity="0.05"/><stop offset="1" stop-color="#E8742C" stop-opacity="0.32"/></linearGradient>
+    <linearGradient id="dune" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#E8742C" stop-opacity="0"/><stop offset="0.5" stop-color="#E8742C"/><stop offset="1" stop-color="#F2B33D" stop-opacity="0"/></linearGradient>
+    <linearGradient id="ink" gradientUnits="userSpaceOnUse" x1="0" y1="212" x2="0" y2="712">
+      <stop offset="0" stop-color="#FFD66E"/><stop offset="0.5" stop-color="#F2B33D"/><stop offset="1" stop-color="#E8742C"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="214" fill="url(#tile)"/>
+  <rect x="64" y="64" width="896" height="896" rx="214" fill="url(#glow)"/>
+  <rect x="66" y="66" width="892" height="892" rx="212" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  <path d="M528.8 313.4Q524 313.4 519.9 313.7Q515.8 314.1 511.7 314.7Q459.6 323.6 380.2 448.3L380.2 448.3Q367.1 468.2 354.5 492.1Q341.8 516.1 330.8 539.4Q324.7 553.1 320.2 568.5Q315.8 583.9 315.8 601.7Q315.8 603.8 315.8 606.2Q315.8 608.6 316.5 611.3Q321.2 646.9 340.4 672.3Q359.6 697.6 391.1 705.8Q413.7 712 438.4 712Q463.7 712 490.4 705.8Q516.5 699.7 542.1 688.4Q567.8 677.1 592.5 662Q615.1 647.6 634.3 630.8Q653.4 614.1 667.1 592.8Q670.6 586.7 675 579.8Q679.5 573 682.9 566.1Q692.5 548.3 700.4 529.1Q708.2 509.9 708.2 483.9Q708.2 482.5 708.2 481.5Q708.2 480.5 708.2 479.1Q708.2 477.8 707.9 477.1Q707.5 476.4 707.5 475.7L688.4 220.2Q687.7 214.1 682.2 213Q676.7 212 673.3 216.8L623.3 300.4L641.8 546.9L641.8 550.4Q641.8 554.5 632.2 559.9Q627.4 562.7 616.5 566.8Q605.5 570.9 588.4 578.4Q571.9 585.3 555.2 590.1Q538.4 594.9 519.9 599.7Q490.4 606.5 459.6 606.5Q458.9 606.5 458.2 606.5Q457.5 606.5 456.2 606.5Q419.9 606.5 398 588.7Q369.9 566.8 369.9 546.9Q369.9 538 374.7 529.1Q384.3 511.3 394.9 494.9Q405.5 478.4 416.5 462Q439.1 429.1 478.8 412.7Q482.2 411.3 485.3 411Q488.4 410.6 492.5 410.6Q513 410.6 519.9 448.3L499.3 457.2Q495.2 459.3 489.1 461.3Q484.9 462.7 477.4 464.1Q469.9 465.4 467.8 470.2L439.7 556.5Q438.4 561.3 441.8 564.7Q445.2 568.2 450 566.8Q489.7 552.4 518.2 528.1Q546.6 503.8 563.7 468.2Q571.9 449 578.8 427.8Q585.6 406.5 585.6 383.2Q585.6 351.7 571.2 332.5Q556.9 313.4 528.8 313.4Z" fill="url(#ink)"/>
+  <path d="M 330 800 Q 512 740 694 800 Q 512 774 330 800 Z" fill="url(#dune)"/>
+</svg>

@@ -1,0 +1,53 @@
+/*
+ * Bundled, offline fonts (all SIL OFL 1.1 — see app/resources/fonts/FAMILY/OFL.txt).
+ *
+ * Two independent families, split by unicode-range, composed in the font stack
+ * (see tokens.css: --font-text). A Latin glyph is served by Merienda, an Arabic
+ * glyph falls through to Aref Ruqaa. They are separate families on purpose:
+ * mixed-weight faces under one family name do not compose across unicode-range.
+ *
+ * Merienda has a large x-height and wide set; `size-adjust` shrinks it so that
+ * Arabic + Latin mixed lines look balanced WITHOUT changing the CSS font-size.
+ */
+
+/* ---- Merienda (Latin) — variable weight 300..900 ------------------------ */
+@font-face {
+  font-family: 'Merienda';
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  size-adjust: 87%;
+  src: url('../../../resources/fonts/merienda/Merienda-Variable.woff2') format('woff2');
+  unicode-range:
+    U+0000-024F, U+0259, U+1E00-1EFF, U+2000-206F, U+20A0-20CF, U+2113, U+2122, U+2190-2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ---- Aref Ruqaa (Arabic: خط الرقعة) ------------------------------------- */
+@font-face {
+  font-family: 'Aref Ruqaa';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../../../resources/fonts/arefruqaa/ArefRuqaa-Regular.woff2') format('woff2');
+  unicode-range:
+    U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF, U+200C-200F, U+0640, U+25CC;
+}
+@font-face {
+  font-family: 'Aref Ruqaa';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../../../resources/fonts/arefruqaa/ArefRuqaa-Bold.woff2') format('woff2');
+  unicode-range:
+    U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF, U+200C-200F, U+0640, U+25CC;
+}
+
+/* ---- JetBrains Mono (code) — variable weight 100..800 ------------------- */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('../../../resources/fonts/jetbrainsmono/JetBrainsMono-Variable.woff2') format('woff2');
+}
