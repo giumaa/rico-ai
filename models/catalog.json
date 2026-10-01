@@ -19,7 +19,7 @@
       "maxContextLength": 262144,
       "license": "Apache-2.0",
       "baseModel": "Qwen/Qwen3.5-4B",
-      "packaged": false,
+      "packaged": true,
       "source": {
         "repo": "lmstudio-community/Qwen3.5-4B-GGUF",
         "file": "Qwen3.5-4B-Q4_K_M.gguf",
@@ -36,19 +36,28 @@
       },
       "files": [
         {
-          "url": "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-lite-Q4_K_M-00001-of-00002.gguf",
+          "fallbackUrl": "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+          "sha256": "e59377bed596e2412da559b6f5dcc0b5a66be62b8e2836c0a46f85f5286859a1",
+          "sizeBytes": 1906694048,
+          "fallbackSha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+          "fallbackSizeBytes": 2707513696
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-lite-Q4_K_M-00002-of-00002.gguf",
           "fallbackUrl": null,
-          "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
-          "sizeBytes": 2707513696
+          "sha256": "37aca18a9c64f504f41edb281a0d907b4387664b4b324ce9a9e081c38fddab5b",
+          "sizeBytes": 800823200
         }
       ],
       "vision": true,
       "mmproj": {
-        "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf",
-        "fallbackUrl": null,
+        "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-lite-mmproj-F16.gguf",
+        "fallbackUrl": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf",
         "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
         "sizeBytes": 672423616
-      }
+      },
+      "packagedAt": "2026-10-01T18:22:28Z"
     },
     {
       "id": "rico",
@@ -66,7 +75,7 @@
       "maxContextLength": 262144,
       "license": "Apache-2.0",
       "baseModel": "google/gemma-4-12B-it",
-      "packaged": false,
+      "packaged": true,
       "source": {
         "repo": "lmstudio-community/gemma-4-12B-it-GGUF",
         "file": "gemma-4-12B-it-Q4_K_M.gguf",
@@ -83,19 +92,40 @@
       },
       "files": [
         {
-          "url": "https://huggingface.co/lmstudio-community/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf",
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-Q4_K_M-00001-of-00004.gguf",
+          "fallbackUrl": "https://huggingface.co/lmstudio-community/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf",
+          "sha256": "75e936dd8999635a31814711968b19f22873cb11234bc95bea5b96d64db0aaa5",
+          "sizeBytes": 1895600224,
+          "fallbackSha256": "95d83ba36642b1f385fb906b5962a71763361be3bac930a709945f72d97473f8",
+          "fallbackSizeBytes": 7381382944
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-Q4_K_M-00002-of-00004.gguf",
           "fallbackUrl": null,
-          "sha256": "95d83ba36642b1f385fb906b5962a71763361be3bac930a709945f72d97473f8",
-          "sizeBytes": 7381382944
+          "sha256": "4419d2c42191bb91c84f7d32a29e0bf6384ce705f1bc96c66de7f9c6f7b5bde2",
+          "sizeBytes": 1870002048
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-Q4_K_M-00003-of-00004.gguf",
+          "fallbackUrl": null,
+          "sha256": "e1b5c95a37f8b1533986efc4d0b379834c996ce6d9b2fa85e4bd4e1557fa0994",
+          "sizeBytes": 1879957376
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-Q4_K_M-00004-of-00004.gguf",
+          "fallbackUrl": null,
+          "sha256": "5b72a88804f6d584ff26e69adc673455ee9b9b414f4ba8acef083458177ed747",
+          "sizeBytes": 1735827040
         }
       ],
       "vision": true,
       "mmproj": {
-        "url": "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf",
-        "fallbackUrl": null,
+        "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-mmproj-F16.gguf",
+        "fallbackUrl": "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf",
         "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e",
         "sizeBytes": 175115840
-      }
+      },
+      "packagedAt": "2026-10-01T18:23:16Z"
     },
     {
       "id": "rico-max",
@@ -113,7 +143,7 @@
       "maxContextLength": 262144,
       "license": "Apache-2.0",
       "baseModel": "google/gemma-4-26B-A4B-it",
-      "packaged": false,
+      "packaged": true,
       "source": {
         "repo": "lmstudio-community/gemma-4-26B-A4B-it-GGUF",
         "file": "gemma-4-26B-A4B-it-Q4_K_M.gguf",
@@ -130,19 +160,76 @@
       },
       "files": [
         {
-          "url": "https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00001-of-00010.gguf",
+          "fallbackUrl": "https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+          "sha256": "4cd0c7b153796b6a2345bd888b7791a6db6bcbc8115c34e151fbf3ff7fc40226",
+          "sizeBytes": 1829809600,
+          "fallbackSha256": "e19514d9541344001cb7c8eaf88704b8bf2e5d8f4e9aac12402eed360cffdfc4",
+          "fallbackSizeBytes": 16796017248
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00002-of-00010.gguf",
           "fallbackUrl": null,
-          "sha256": "e19514d9541344001cb7c8eaf88704b8bf2e5d8f4e9aac12402eed360cffdfc4",
-          "sizeBytes": 16796017248
+          "sha256": "a70e3d5c0f5c864f91f66fa95ec3fbf5f4b0aea111258c532e77bb7a8ce4430b",
+          "sizeBytes": 1855048512
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00003-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "fed160684fdc21995ada1b53c6536bc2e5cc30e05517a5a7dde850d469a6026a",
+          "sizeBytes": 1887952096
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00004-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "f347d29b044518c0d5d8068baed907e63e9a9119364adc54eaf078a72807f041",
+          "sizeBytes": 1759890304
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00005-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "ecf9a948aeb5c8ebd061709b6316b7f20c09fcbf02a65159f473c0ed66adf4fe",
+          "sizeBytes": 1887952160
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00006-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "dd2b60fe7fef809d3034869bb67e7617007f5e9b1c82e3ee0b2c0a2f96ffdedd",
+          "sizeBytes": 1759890304
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00007-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "8ab98835fc03cec746ca7c85036fa72d5e248137b7afdf7e4017a75fd2eba838",
+          "sizeBytes": 1896807648
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00008-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "f25e2507159087966ba755d767a00a7492bcc2f9fc43ebe30db062a120504770",
+          "sizeBytes": 1851397056
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00009-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "39cdb0b1a66554dfd811ea9be68871b6741870e5dbb809a8081524b82392f8ad",
+          "sizeBytes": 1778385536
+        },
+        {
+          "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-Q4_K_M-00010-of-00010.gguf",
+          "fallbackUrl": null,
+          "sha256": "4e8dd5973891a2d5534baaf61d42e561bbf597e3f495ab73f37ab51d13ea44de",
+          "sizeBytes": 288888512
         }
       ],
       "vision": true,
       "mmproj": {
-        "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-F16.gguf",
-        "fallbackUrl": null,
+        "url": "https://github.com/giumaa/rico-ai/releases/download/models-v1/rico-max-mmproj-F16.gguf",
+        "fallbackUrl": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "sha256": "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
         "sizeBytes": 1193058784
-      }
+      },
+      "packagedAt": "2026-10-01T18:34:36Z"
     }
   ]
 }
