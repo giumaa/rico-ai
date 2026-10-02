@@ -114,7 +114,8 @@ jobs:
           fi
           if grep -qi "error" status.txt; then
             mkdir -p kaggle_err && kaggle kernels output "${KAGGLE_OWNER}/${KERNEL_SLUG}" -p kaggle_err >/dev/null 2>&1 || true
-            for f in $(find kaggle_err -name '*.log' -o -name '*.txt' | head -5); do
+            find kaggle_err -maxdepth 2 -type f | head -20
+            for f in $(find kaggle_err -maxdepth 2 -type f \( -name '*.log' -o -name 'train_log*' -o -name '*.err' \) | head -3); do
               echo "===== $f"; python - "$f" <<'PY'
           import json, sys
           raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
