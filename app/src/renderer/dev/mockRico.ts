@@ -394,7 +394,17 @@ export function installMockRico(): void {
         save(LS.models, store);
         setLoad({ modelId, state: 'loading' });
         await sleep(1800);
-        setLoad({ modelId, state: 'ready' });
+        // ?visionoff=1 simulates the image engine being blocked (Windows Smart App Control): the model supports vision, the engine does not
+        const visionOff = !!params.get('visionoff');
+        setLoad({
+          modelId,
+          state: 'ready',
+          vision: !visionOff && !params.get('novision'),
+          engine: visionOff ? 'node-llama-cpp' : 'server',
+          ...(visionOff
+            ? { visionNote: 'ويندوز (Smart App Control) منع محرّك الصور متاع ريكو. الكتابة تخدم عادي.' }
+            : {}),
+        });
         settings = { ...settings, activeModelId: modelId };
         save(LS.settings, settings);
       },

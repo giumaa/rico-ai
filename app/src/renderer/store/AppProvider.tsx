@@ -20,7 +20,7 @@ import type {
 import { translate, type Params, type TKey } from '../i18n';
 import { fileToAttachment, isImageFile } from '../lib/image';
 import { makeTitle, uid } from '../lib/text';
-import { imageLimits, visionBlocked } from './selectors';
+import { engineVisionOff, imageLimits, visionBlocked } from './selectors';
 import { DEFAULT_SETTINGS, initialState, reducer } from './reducer';
 import type { AppState, SettingsTab, ToastAction, ToastKind } from './types';
 
@@ -111,6 +111,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const tr = useCallback(
     (key: TKey, params?: Params) => translate(stateRef.current.settings.uiLang, key, params),
     [],
+  );
+
+  /** Why attaching images is refused: a text-only model, or an engine whose image support is switched off. */
+  const noVisionToast = useCallback(
+    (s: AppState): string => (engineVisionOff(s) ? s.loadState.visionNote || tr('composer.attachEngineOff') : tr('toast.noVision')),
+    [tr],
   );
 
   // ------------------------------------------------------------ toasts
@@ -438,7 +444,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const images = stateRef.current.attachments;
       if ((!text && !images.length) || stateRef.current.stream || stateRef.current.pendingImages > 0) return false;
       if (images.length && visionBlocked(stateRef.current)) {
-        pushToast('info', tr('toast.noVision'));
+        pushToast('info', noVisionToast(stateRef.current));
         return false;
       }
       const limits = imageLimits(stateRef.current);
@@ -483,7 +489,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       void runGeneration(chatId, assistantMsg.id, history);
       return true;
     },
-    [preflight, pushToast, runGeneration, tr],
+    [noVisionToast, preflight, pushToast, runGeneration, tr],
   );
 
   const addImages = useCallback(
@@ -492,7 +498,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!imgs.length) return;
       const s = stateRef.current;
       if (visionBlocked(s)) {
-        pushToast('info', tr('toast.noVision'));
+        pushToast('info', noVisionToast(s));
         return;
       }
       const limits = imageLimits(s);
@@ -507,7 +513,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (ok.length) dispatch({ type: 'ATTACH_ADD', images: ok, max: limits.maxImages });
       if (ok.length < take.length) pushToast('error', tr('toast.imageFailed'));
     },
-    [pushToast, tr],
+    [noVisionToast, pushToast, tr],
   );
 
   const regenerate = useCallback(() => {

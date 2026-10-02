@@ -3,6 +3,7 @@ import { ChevronDown, TriangleAlert } from 'lucide-react';
 import { useActions, useAppState } from '../../store/AppProvider';
 import { useStickToBottom } from '../../hooks/useStickToBottom';
 import { useI18n } from '../../i18n/useI18n';
+import { firstSentence } from '../../lib/text';
 import { Hero } from './Hero';
 import { Message } from './Message';
 
@@ -30,7 +31,7 @@ export function ChatView() {
     } else if (wasStreaming.current) {
       wasStreaming.current = false;
       if (last && last.role === 'assistant' && last.content.trim()) {
-        setAnnouncement(`${t('msg.answerReady')}: ${last.content.slice(0, 600)}`);
+        setAnnouncement(`${t('msg.answerReady')}: ${firstSentence(last.content)}`);
       }
     }
   }, [stream, last, t]);

@@ -6,7 +6,7 @@ import { totalmem } from 'node:os';
 import type { ModelLoadState, Settings, UiLang } from '../shared/api';
 import { EngineError } from './engine/errors';
 import type { Engine } from './engine/types';
-import { msg, RicoError } from './messages';
+import { msg, noVisionKey, RicoError } from './messages';
 import type { ModelManager } from './modelManager';
 import type { SettingsStore } from './storage';
 
@@ -54,12 +54,18 @@ export class EngineService {
     });
   }
 
+  /** The engine reports a vision-issue code; the renderer gets a sentence in the UI language. */
+  private localise(s: ModelLoadState): ModelLoadState {
+    if (s.state !== 'ready' || !s.visionNote) return s;
+    return { ...s, visionNote: msg(noVisionKey(s.visionNote), this.deps.lang()) };
+  }
+
   getLoadState(): ModelLoadState {
-    return this.deps.host.getLoadState();
+    return this.localise(this.deps.host.getLoadState());
   }
 
   onLoadState(cb: (s: ModelLoadState) => void): () => void {
-    return this.deps.host.onLoadState(cb);
+    return this.deps.host.onLoadState((s) => cb(this.localise(s)));
   }
 
   private keyFor(modelId: string, s: Settings): string {

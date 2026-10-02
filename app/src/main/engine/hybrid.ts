@@ -77,7 +77,14 @@ export class HybridEngine implements Engine {
     try {
       const info = await this.loadInner(modelId, params);
       this.info = info;
-      this.setState({ modelId, state: 'ready' });
+      this.setState({
+        modelId,
+        state: 'ready',
+        vision: info.vision === true,
+        engine: info.engine === 'llama-server' ? 'server' : 'node-llama-cpp',
+        // a VisionIssue code here; EngineService turns it into a localised sentence
+        ...(info.visionNote ? { visionNote: info.visionNote } : {})
+      });
       return info;
     } catch (err) {
       this.active = undefined;

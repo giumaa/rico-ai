@@ -49,7 +49,8 @@ const binRoot = resolve(here, '..', 'resources', 'bin');
 
 function readPinnedTag() {
   try {
-    const t = readFileSync(resolve(here, '..', '..', 'LLAMA_CPP_TAG'), 'utf8').trim();
+    const raw = readFileSync(resolve(here, '..', '..', 'LLAMA_CPP_TAG'), 'utf8');
+    const t = raw.split(/[\r\n]+/).filter((l) => !l.trim().startsWith('#')).join('').trim(); // '#' comment lines allowed
     if (/^b\d+$/.test(t)) return t;
   } catch {
     /* no file: use the built-in pin */

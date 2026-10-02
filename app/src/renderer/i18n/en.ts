@@ -187,6 +187,7 @@ export const en: Dict = {
   'mdl.vision': 'Sees images',
   'composer.attach': 'Attach an image',
   'composer.attachDisabled': 'The current model can’t see images — switch to a model that supports them',
+  'composer.attachEngineOff': 'The image engine is turned off on this computer; you can still type as usual',
   'composer.maxImages': 'Up to {n} images per message',
   'composer.dropImages': 'Drop images here',
   'composer.removeImage': 'Remove image',

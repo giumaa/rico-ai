@@ -27,9 +27,9 @@ docs/                     user + developer docs (Arabic first)   (any agent, own
 
 ## Tech decisions
 - Electron (latest stable) + electron-vite (or Vite) + TypeScript strict + React 19. Package with electron-builder: Windows NSIS (x64), macOS dmg (arm64 + x64), Linux AppImage + deb.
-- LLM runtime: **node-llama-cpp v3** (llama.cpp; auto GPU: CUDA/Vulkan/Metal, CPU fallback). Inference runs in an Electron **utilityProcess** (not the UI process), at **below-normal OS priority**, so the user's PC never freezes.
+- LLM runtime: the **llama-server sidecar** (official llama.cpp release binary, pinned in `LLAMA_CPP_TAG`; Vulkan/Metal/CPU builds) is the primary engine and the only one with **vision** (mmproj). **node-llama-cpp v3** (in an Electron **utilityProcess**) probes the hardware and is the **text-only fallback** when the sidecar is missing or blocked by the OS (e.g. Windows Smart App Control). Inference runs outside the UI process at **below-normal OS priority**, so the user's PC never freezes.
 - Default "Eco" performance mode: threads = max(2, physicalCores − 2), batch modest; "Max" mode available in settings.
-- Model files: GGUF. Hosted as GitHub Release assets (repo `rico-ai`, release tag `models-v1`), split with `llama-gguf-split` into ≤1.9 GB shards (GitHub 2 GiB asset limit); node-llama-cpp loads split GGUF by first shard. Fallback URL: original Hugging Face GGUF. Downloads: resumable, sha256-verified, progress events. Also **"Import model file"** (fully offline install from USB).
+- Model files: GGUF. Hosted as GitHub Release assets (repo `rico-ai`, release tag `models-v1`), split with `llama-gguf-split` into ≤1.9 GB shards (GitHub 2 GiB asset limit); llama.cpp loads split GGUF by first shard. Fallback URL: original Hugging Face GGUF. Downloads: resumable, sha256-verified, progress events. Also **"Import model file"** (fully offline install from USB).
 - The only network access in the entire app: model download that the user explicitly starts. Everything else blocked (CSP, `will-navigate`/`setWindowOpenHandler` deny, `session.webRequest` blocks all non-file requests except the model download in main).
 - Storage: chats + settings as JSON in `app.getPath('userData')`. No cloud.
 

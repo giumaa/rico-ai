@@ -110,6 +110,22 @@ export function msg(key: MsgKey, lang: UiLang, detail?: string): string {
   return text.replace('{detail}', detail ?? '');
 }
 
+/** Why a projector-equipped model cannot read images right now (see LoadedInfo.visionNote). */
+export function noVisionKey(note: string | undefined): MsgKey {
+  switch (note) {
+    case 'blocked':
+      return 'noVisionBlocked';
+    case 'unavailable':
+      return 'noVisionUnavailable';
+    case 'failed':
+      return 'noVisionFailed';
+    case 'projector':
+      return 'noVisionProjector';
+    default:
+      return 'noVision';
+  }
+}
+
 /** Error carrying a localised message plus a stable machine-readable code. */
 export class RicoError extends Error {
   constructor(

@@ -28,7 +28,7 @@ asarUnpack:
   - node_modules/node-llama-cpp/**
   - node_modules/@node-llama-cpp/**
 
-# Hardening fuses (applied and verified with  + the smoke test).
+# Hardening fuses (verified with the packaged-app smoke test).
 # runAsNode stays ON on purpose: node-llama-cpp's Windows GPU (Vulkan) binary self-test calls child_process.fork() from
 # inside the engine utilityProcess, which throws when the fuse is off -> the hardware probe then reports 'no GPU' and the
 # sidecar is planned CPU-only. Turn it off once the probe no longer needs node-llama-cpp (e.g. llama-server --list-devices).
@@ -39,6 +39,7 @@ electronFuses:
   enableEmbeddedAsarIntegrityValidation: true
   onlyLoadAppFromAsar: true
   enableCookieEncryption: true
+  grantFileProtocolExtraPrivileges: false
 
 # Only Arabic + English UI strings from Chromium (saves ~40 MB).
 electronLanguages:

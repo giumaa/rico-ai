@@ -2,9 +2,20 @@ import type { ModelEntry } from '@shared/api';
 import { MAX_EDGE_DEFAULT, MAX_IMAGES } from '../lib/image';
 import type { AppState } from './types';
 
-/** True when the active model is known NOT to understand images (supportsVision === false). */
-export function visionBlocked(state: Pick<AppState, 'models'>): boolean {
-  return state.models.find((m) => m.isActive)?.supportsVision === false;
+/**
+ * True when the loaded ENGINE reports that it cannot read images right now (e.g. the image engine was blocked by Windows),
+ * even though the model itself supports vision (ModelEntry.supportsVision).
+ */
+export function engineVisionOff(state: Pick<AppState, 'models' | 'loadState'>): boolean {
+  const active = state.models.find((m) => m.isActive);
+  const ls = state.loadState;
+  return !!active && ls.state === 'ready' && ls.vision === false && (!ls.modelId || ls.modelId === active.id);
+}
+
+/** True when images cannot be used: the active model is text-only, or its engine has vision switched off. */
+export function visionBlocked(state: Pick<AppState, 'models' | 'loadState'>): boolean {
+  const active = state.models.find((m) => m.isActive);
+  return active?.supportsVision === false || (active?.supportsVision === true && engineVisionOff(state));
 }
 
 export interface ImageLimits {

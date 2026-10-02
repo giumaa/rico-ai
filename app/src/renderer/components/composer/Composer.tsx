@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
 import { ArrowUp, ImagePlus, Square, X } from 'lucide-react';
 import { useActions, useAppState } from '../../store/AppProvider';
-import { imageLimits, visionBlocked } from '../../store/selectors';
+import { engineVisionOff, imageLimits, visionBlocked } from '../../store/selectors';
 import { useAutoGrow } from '../../hooks/useAutoGrow';
 import { useI18n } from '../../i18n/useI18n';
 import { imageSrc, isImageFile } from '../../lib/image';
@@ -27,7 +27,14 @@ export function Composer() {
   const noVision = visionBlocked(state);
   const { maxImages } = imageLimits(state);
   const full = attachments.length + pendingImages >= maxImages;
-  const attachLabel = noVision ? t('composer.attachDisabled') : full ? t('composer.maxImages', { n: maxImages }) : t('composer.attach');
+  const engineOff = noVision && engineVisionOff(state);
+  const attachLabel = engineOff
+    ? state.loadState.visionNote || t('composer.attachEngineOff')
+    : noVision
+      ? t('composer.attachDisabled')
+      : full
+        ? t('composer.maxImages', { n: maxImages })
+        : t('composer.attach');
 
   useAutoGrow(ref, value);
 

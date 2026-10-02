@@ -63,3 +63,11 @@ export function detectDir(text: string): 'rtl' | 'ltr' | undefined {
   }
   return undefined;
 }
+
+/** First sentence (or first line) of a reply with markdown noise removed, capped: the screen-reader announcement stays short. */
+export function firstSentence(text: string, max = 160): string {
+  const flat = text.replace(/```[\s\S]*?```/g, ' ').replace(/[#*_`>|]/g, '').trim();
+  const m = /^[\s\S]*?(?:[.!?؟…]+(?=\s|$)|\n)/.exec(flat);
+  const s = (m ? m[0] : flat).replace(/\s+/g, ' ').trim();
+  return s.length > max ? `${s.slice(0, max).trimEnd()}…` : s;
+}

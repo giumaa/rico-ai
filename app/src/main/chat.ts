@@ -7,7 +7,7 @@ import { IPC } from '../shared/ipc';
 import type { Engine } from './engine/types';
 import { type EngineService, toUserError } from './engineService';
 import { sanitizeImages } from './images';
-import { msg, type MsgKey } from './messages';
+import { msg, noVisionKey } from './messages';
 import { maxImagesForContext } from './tuning';
 import { assemblePrompt, loadPersonaFiles } from './persona';
 import type { SettingsStore } from './storage';
@@ -19,22 +19,6 @@ export interface ChatControllerDeps {
   personaDir: string;
   lang(): UiLang;
   log?: (...args: unknown[]) => void;
-}
-
-/** Why a projector-equipped model cannot read images right now (see LoadedInfo.visionNote). */
-function noVisionKey(note: string | undefined): MsgKey {
-  switch (note) {
-    case 'blocked':
-      return 'noVisionBlocked';
-    case 'unavailable':
-      return 'noVisionUnavailable';
-    case 'failed':
-      return 'noVisionFailed';
-    case 'projector':
-      return 'noVisionProjector';
-    default:
-      return 'noVision';
-  }
 }
 
 interface ActiveRequest {

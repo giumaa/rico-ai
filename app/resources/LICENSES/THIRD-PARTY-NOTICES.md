@@ -8,7 +8,7 @@ Rico (MIT, see `Rico-LICENSE.txt`) bundles or downloads the following. Full lice
 | Gemma 4 models ("rico", "rico-max") | Apache-2.0 + Gemma Prohibited Use Policy (use restrictions that you must pass on) | `Apache-2.0.txt`, `Gemma-Prohibited-Use-Policy.txt` |
 | llama.cpp / ggml (`llama-server` sidecar, libmtmd) | MIT | `llama.cpp-MIT.txt` |
 | LLVM OpenMP runtime (`libomp.dll`, bundled with the sidecar) | Apache-2.0 with LLVM exception | `LICENSE-LLVM-OpenMP` next to the binary |
-| node-llama-cpp | MIT | npm package license |
+| node-llama-cpp (text-only fallback engine) | MIT | `node-llama-cpp-MIT.txt` |
 | Electron / Chromium | MIT / BSD-3-Clause and others | `LICENSE.electron.txt`, `LICENSES.chromium.html` in the app folder |
 | Aref Ruqaa, Merienda, JetBrains Mono (bundled fonts) | SIL Open Font License 1.1 | `fonts/*-OFL.txt` |
 

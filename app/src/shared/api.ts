@@ -113,6 +113,12 @@ export interface ModelLoadState {
   modelId?: string;
   state: 'idle' | 'loading' | 'ready' | 'error';
   error?: string;
+  /** Filled by the engine when state === 'ready': can THIS loaded engine read images right now? (false = the image engine is off, e.g. blocked by Windows) */
+  vision?: boolean;
+  /** Which engine runs the model (filled on 'ready'). 'server' = the llama-server sidecar, 'node-llama-cpp' = the text-only fallback. */
+  engine?: 'server' | 'node-llama-cpp';
+  /** Localised reason why vision is off although the model has a projector (only when vision === false). */
+  visionNote?: string;
 }
 
 export type Unsubscribe = () => void;
