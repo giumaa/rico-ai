@@ -11,7 +11,7 @@ Files:
 # 1) Serve a model with an OpenAI-compatible API (llama.cpp):
 llama-server -m rico-lite.gguf --port 8080 -c 8192
 
-# 2) Generate answers and score them. The runner sends system-prompt.md, plus the dialect override, plus the few-shots:
+# 2) Generate answers and score them. The runner sends system-prompt.md (examples are inline), plus the dialect override, with thinking disabled:
 node eval/run_eval.mjs --endpoint http://127.0.0.1:8080/v1/chat/completions
 
 # Score an existing answers file. Each line is {"id":"ev001","response":"..."}
@@ -33,3 +33,5 @@ The runner prints pass/total for each category and lists the failed checks. It a
 - **Honesty/offline:** "I don't know" and offline signals are required. Fabricated numbers, URLs and dates are rejected through `must_not_include`.
 
 These are heuristics. Read the failures yourself before changing prompts or training data.
+
+Note: `ml/data/seed/glossary.json` is the 340-entry dialect glossary (فصحى→ليبي). It is reference material for authors and distillation only, so it is not shipped in the app and not used in scoring.

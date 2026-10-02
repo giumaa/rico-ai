@@ -6,7 +6,7 @@
 
 import type { ModelLoadState } from '../../shared/api';
 import { EngineError } from './errors';
-import type { LoadedInfo, LoadParams, WorkerHardware } from './protocol';
+import type { LoadedInfo, LoadParams, VisionIssue, WorkerHardware } from './protocol';
 import type { Backend, Engine, GenerateHandlers, GenerateInput } from './types';
 
 export interface SidecarBackend extends Backend {
@@ -16,6 +16,10 @@ export interface SidecarBackend extends Backend {
 export class HybridEngine implements Engine {
   private active: Backend | undefined;
   private info: LoadedInfo | undefined;
+  /** While a load is running, backend state events (e.g. the sidecar failing before the fallback) must not leak out. */
+  private loadInFlight = false;
+  /** The OS refused to run the sidecar (Windows Smart App Control, exit 0xC0E90002): do not relaunch it on every load / perf switch. */
+  private sidecarBlocked = false;
   private state: ModelLoadState = { state: 'idle' };
   private listeners = new Set<(s: ModelLoadState) => void>();
 
@@ -27,7 +31,7 @@ export class HybridEngine implements Engine {
     // A backend dying while it is the active one must surface as a load-state change.
     for (const b of [worker, sidecar]) {
       b?.onLoadState((s) => {
-        if (this.active === b && (s.state === 'error' || s.state === 'idle')) {
+        if (!this.loadInFlight && this.active === b && (s.state === 'error' || s.state === 'idle')) {
           this.info = undefined;
           this.setState(s);
         }
@@ -69,6 +73,7 @@ export class HybridEngine implements Engine {
 
   async load(modelId: string, params: LoadParams): Promise<LoadedInfo> {
     this.setState({ modelId, state: 'loading' });
+    this.loadInFlight = true;
     try {
       const info = await this.loadInner(modelId, params);
       this.info = info;
@@ -77,8 +82,13 @@ export class HybridEngine implements Engine {
     } catch (err) {
       this.active = undefined;
       this.info = undefined;
-      this.setState({ modelId, state: 'error', error: err instanceof Error ? err.message : String(err) });
+      // A load superseded by unload()/another load() is not an error.
+      if (!(err instanceof EngineError && err.code === 'cancelled')) {
+        this.setState({ modelId, state: 'error', error: err instanceof Error ? err.message : String(err) });
+      }
       throw err;
+    } finally {
+      this.loadInFlight = false;
     }
   }
 
@@ -91,19 +101,25 @@ export class HybridEngine implements Engine {
     this.active = undefined;
     this.info = undefined;
 
-    let sidecarProblem: string | undefined;
-    if (this.sidecar?.isAvailable()) {
+    let sidecarProblem: VisionIssue | undefined;
+    if (this.sidecar?.isAvailable() && this.sidecarBlocked) {
+      sidecarProblem = 'blocked';
+    } else if (this.sidecar?.isAvailable()) {
       this.active = this.sidecar;
       try {
-        return await this.sidecar.load(modelId, params);
+        const loaded = await this.sidecar.load(modelId, params);
+        // The probe worker is no longer needed: do not let its Vulkan context hold VRAM next to the sidecar.
+        void this.worker.release?.().catch(() => undefined);
+        return loaded;
       } catch (err) {
         const fallbackable = err instanceof EngineError && (err.code === 'blocked' || err.code === 'crashed' || err.code === 'unavailable');
         if (!fallbackable) throw err;
-        sidecarProblem = err.message;
+        sidecarProblem = err.code === 'blocked' ? 'blocked' : err.code === 'unavailable' ? 'unavailable' : 'failed';
+        if (err.code === 'blocked') this.sidecarBlocked = true; // remembered until the app restarts
         this.log?.('llama-server unavailable, falling back to node-llama-cpp (text only):', err.message);
       }
     } else {
-      sidecarProblem = 'The image engine (llama-server) is not installed in this build.';
+      sidecarProblem = 'unavailable';
     }
 
     // Text-only fallback.

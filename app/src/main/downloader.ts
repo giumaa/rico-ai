@@ -13,6 +13,7 @@ import { pipeline } from 'node:stream/promises';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 
 export const PART_SUFFIX = '.part';
+export const VERIFIED_SUFFIX = '.verified';
 const USER_AGENT = 'Rico-Model-Downloader';
 
 export class HttpStatusError extends Error {
@@ -148,6 +149,15 @@ export function classifyError(err: unknown): FailureKind {
   return 'transient';
 }
 
+/**
+ * True when the SOURCE itself is unusable (file removed/forbidden, or the bytes are wrong), so a mirror / alternative file set
+ * is worth trying. Offline, timeouts, 5xx/429 and local disk errors are not: switching sources would only throw away progress.
+ */
+export function isSourceFailure(err: unknown): boolean {
+  if (err instanceof ChecksumError || err instanceof SizeMismatchError) return true;
+  return err instanceof HttpStatusError && (err.status === 403 || err.status === 404 || err.status === 410);
+}
+
 export function backoffDelayMs(attempt: number): number {
   return Math.min(8000, 1000 * 2 ** attempt);
 }
@@ -234,6 +244,29 @@ export async function sha256OfFile(path: string, signal?: AbortSignal): Promise<
   return hash.digest('hex');
 }
 
+/**
+ * A completed file that passed its sha256 check gets a `<file>.verified` marker (size + mtime + sha256), so a retry or a
+ * resumed multi-shard download never re-hashes gigabytes that were already verified.
+ */
+async function isMarkedVerified(path: string, sha: string): Promise<boolean> {
+  try {
+    const [st, raw] = await Promise.all([fs.stat(path), fs.readFile(path + VERIFIED_SUFFIX, 'utf8')]);
+    const m = JSON.parse(raw) as { size?: number; mtimeMs?: number; sha256?: string };
+    return m.size === st.size && m.mtimeMs === st.mtimeMs && m.sha256 === sha;
+  } catch {
+    return false;
+  }
+}
+
+async function markVerified(path: string, sha: string): Promise<void> {
+  try {
+    const st = await fs.stat(path);
+    await fs.writeFile(path + VERIFIED_SUFFIX, JSON.stringify({ size: st.size, mtimeMs: st.mtimeMs, sha256: sha }));
+  } catch {
+    /* the marker is only an optimisation */
+  }
+}
+
 async function fileSize(path: string): Promise<number> {
   try {
     return (await fs.stat(path)).size;
@@ -264,7 +297,8 @@ export interface DownloadFileOptions {
 export async function downloadFile(o: DownloadFileOptions): Promise<void> {
   const part = o.destPath + PART_SUFFIX;
   const sha = normalizeSha256(o.sha256);
-  const maxRetries = o.maxRetries ?? 4;
+  // Up to this many CONSECUTIVE attempts without any new bytes; every attempt that made progress resets the counter.
+  const maxRetries = o.maxRetries ?? 20;
   const delay = o.retryDelayMs ?? backoffDelayMs;
 
   // Already complete from an earlier run?
@@ -274,18 +308,25 @@ export async function downloadFile(o: DownloadFileOptions): Promise<void> {
       o.onBytes(existingFinal, existingFinal);
       return;
     }
+    if (await isMarkedVerified(o.destPath, sha)) {
+      o.onBytes(existingFinal, existingFinal);
+      return;
+    }
     o.onVerifying?.();
     if ((await sha256OfFile(o.destPath, o.signal)) === sha) {
+      await markVerified(o.destPath, sha);
       o.onBytes(existingFinal, existingFinal);
       return;
     }
     await fs.rm(o.destPath, { force: true });
+    await fs.rm(o.destPath + VERIFIED_SUFFIX, { force: true });
   }
 
   let attempt = 0;
   let restartedFrom416 = false;
   for (;;) {
     if (o.signal.aborted) throw new DownloadCancelledError();
+    const before = await fileSize(part);
     try {
       await transfer();
       break;
@@ -293,6 +334,7 @@ export async function downloadFile(o: DownloadFileOptions): Promise<void> {
       const kind = classifyError(err);
       if (kind === 'cancelled' || o.signal.aborted) throw new DownloadCancelledError();
       if (kind === 'fatal') throw err;
+      if ((await fileSize(part)) > before) attempt = 0; // progress was made: the connection is just flaky
       const limit = kind === 'offline' ? 1 : maxRetries;
       if (attempt >= limit) throw err;
       attempt++;
@@ -314,6 +356,7 @@ export async function downloadFile(o: DownloadFileOptions): Promise<void> {
     }
   }
   await fs.rename(part, o.destPath);
+  if (sha) await markVerified(o.destPath, sha);
   o.onBytes(size, size);
 
   async function transfer(): Promise<void> {
@@ -327,6 +370,8 @@ export async function downloadFile(o: DownloadFileOptions): Promise<void> {
       return; // all bytes are already on disk; verification happens after the loop
     }
 
+    // First progress event of a resumed download = what is already on disk (the bar never dips to 0 while connecting).
+    if (existing > 0) o.onBytes(existing, o.expectedSize ?? null);
     const result = await httpGet(o.url, buildRequestHeaders(existing), { signal: o.signal, ...o.http });
     const plan = planResponse(result.status, result.headers, existing);
 

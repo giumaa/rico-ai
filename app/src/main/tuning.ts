@@ -42,7 +42,7 @@ export function tierForMemory(memGB: number): (typeof TIER_ORDER)[number] {
 
 /**
  * Picks the catalog model to recommend. Starts from the RAM(+VRAM) tier and steps DOWN while the tier's
- * model does not fit (minRamGB > available memory). Falls back to the smallest catalog model.
+ * model does not fit (minRamGB > totalRamGiB * 1.07 + 0.5). Falls back to the smallest catalog model.
  */
 export function recommendModelId(
   hw: Pick<HardwareFacts, 'totalRamGB' | 'vramGB' | 'gpuType' | 'gpuUnified'>,
@@ -53,14 +53,16 @@ export function recommendModelId(
   if (catalog.length === 0) return startTier;
 
   const byId = new Map(catalog.map((m) => [m.id, m]));
+  // os.totalmem() is in GiB (and a "16 GB" laptop reports ~15.4), catalog minRamGB is nominal decimal GB: compare fairly.
+  const fits = (m: TierCandidate): boolean => m.minRamGB <= mem * 1.07 + 0.5;
   let idx = TIER_ORDER.indexOf(startTier);
   for (; idx >= 0; idx--) {
     const m = byId.get(TIER_ORDER[idx]!);
-    if (m && m.minRamGB <= mem + 0.25) return m.id;
+    if (m && fits(m)) return m.id;
   }
 
   // Catalog has no known tier ids that fit: choose the biggest catalog model that fits, else the smallest overall.
-  const fitting = catalog.filter((m) => m.minRamGB <= mem + 0.25).sort((a, b) => b.sizeGB - a.sizeGB);
+  const fitting = catalog.filter(fits).sort((a, b) => b.sizeGB - a.sizeGB);
   if (fitting[0]) return fitting[0].id;
   return [...catalog].sort((a, b) => a.sizeGB - b.sizeGB)[0]!.id;
 }
@@ -95,6 +97,29 @@ export function pickContextSize(i: ContextSizeInput): number {
   if (i.trainContext && i.trainContext > 0) size = Math.min(size, i.trainContext);
   size = Math.floor(size / 256) * 256;
   return Math.max(1024, size);
+}
+
+/** Vision models get head-room for image tokens even on small machines (each image costs ~1000 tokens). */
+export function pickVisionContextSize(i: ContextSizeInput): number {
+  const base = pickContextSize(i);
+  return Math.max(base, Math.min(4096, i.requested > 0 ? i.requested : 4096));
+}
+
+/** Images accepted per message: 4 images x ~1200 tokens would overflow a 4096-token window. */
+export function maxImagesForContext(contextSize: number): number {
+  if (contextSize <= 4096) return 2;
+  if (contextSize <= 8192) return 4;
+  return 6;
+}
+
+/** Long edge (px) the renderer should downscale images to for this window. */
+export function maxImageEdgeForContext(contextSize: number): number {
+  return contextSize <= 4096 ? 896 : 1280;
+}
+
+/** "--image-max-tokens" (supported by the pinned llama-server build; dynamic-resolution vision models) for windows <= 8192; undefined = model default. */
+export function imageMaxTokensForContext(contextSize: number): number | undefined {
+  return contextSize <= 8192 ? 512 : undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------

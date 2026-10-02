@@ -18,9 +18,9 @@ import type {
   TokenEvent,
 } from '@shared/api';
 import { translate, type Params, type TKey } from '../i18n';
-import { MAX_IMAGES, fileToAttachment, isImageFile } from '../lib/image';
+import { fileToAttachment, isImageFile } from '../lib/image';
 import { makeTitle, uid } from '../lib/text';
-import { visionBlocked } from './selectors';
+import { imageLimits, visionBlocked } from './selectors';
 import { DEFAULT_SETTINGS, initialState, reducer } from './reducer';
 import type { AppState, SettingsTab, ToastAction, ToastKind } from './types';
 
@@ -96,7 +96,8 @@ const toHistory = (messages: ChatMessage[]): Pick<ChatMessage, 'role' | 'content
   messages.map((m) => (m.images?.length ? { role: m.role, content: m.content, images: m.images } : { role: m.role, content: m.content }));
 
 const FLUSH_MS = 40;
-const LOAD_TIMEOUT_MS = 180_000;
+// rico-max can take minutes to map from a slow disk; main reports real failures via the load-state error
+const LOAD_TIMEOUT_MS = 15 * 60_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -440,6 +441,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         pushToast('info', tr('toast.noVision'));
         return false;
       }
+      const limits = imageLimits(stateRef.current);
+      if (images.length > limits.maxImages) {
+        pushToast('info', tr('composer.maxImages', { n: limits.maxImages }));
+        return false;
+      }
 
       const ok = await preflight();
       if (!ok) {
@@ -489,15 +495,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         pushToast('info', tr('toast.noVision'));
         return;
       }
-      const room = MAX_IMAGES - s.attachments.length - s.pendingImages;
-      if (imgs.length > room) pushToast('info', tr('composer.maxImages'));
+      const limits = imageLimits(s);
+      const room = limits.maxImages - s.attachments.length - s.pendingImages;
+      if (imgs.length > room) pushToast('info', tr('composer.maxImages', { n: limits.maxImages }));
       const take = imgs.slice(0, Math.max(0, room));
       if (!take.length) return;
       dispatch({ type: 'ATTACH_PENDING', delta: take.length });
-      const results = await Promise.allSettled(take.map(fileToAttachment));
+      const results = await Promise.allSettled(take.map((f) => fileToAttachment(f, limits.maxEdge)));
       dispatch({ type: 'ATTACH_PENDING', delta: -take.length });
       const ok = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
-      if (ok.length) dispatch({ type: 'ATTACH_ADD', images: ok });
+      if (ok.length) dispatch({ type: 'ATTACH_ADD', images: ok, max: limits.maxImages });
       if (ok.length < take.length) pushToast('error', tr('toast.imageFailed'));
     },
     [pushToast, tr],
@@ -619,15 +626,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     const api = window.rico;
     (async () => {
-      const [settings, system, chatIndex, models, loadState] = await Promise.all([
+      // system.getInfo() can take a long time on first run (worker spawn + GPU probe): never block the UI on it
+      void api.system
+        .getInfo()
+        .then((system) => !cancelled && dispatch({ type: 'SYSTEM', system }))
+        .catch(() => undefined);
+      const [settings, chatIndex, models, loadState] = await Promise.all([
         api.settings.get().catch(() => DEFAULT_SETTINGS),
-        api.system.getInfo().catch(() => null),
         api.chats.list().catch(() => []),
         api.models.list().catch(() => [] as ModelEntry[]),
         api.models.getLoadState().catch(() => ({ state: 'idle' as const })),
       ]);
       if (!cancelled) {
-        dispatch({ type: 'BOOTED', settings, system, chatIndex, models, loadState });
+        dispatch({ type: 'BOOTED', settings, chatIndex, models, loadState });
       }
     })();
     return () => {

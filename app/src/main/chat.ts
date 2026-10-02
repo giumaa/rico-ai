@@ -7,7 +7,8 @@ import { IPC } from '../shared/ipc';
 import type { Engine } from './engine/types';
 import { type EngineService, toUserError } from './engineService';
 import { sanitizeImages } from './images';
-import { msg } from './messages';
+import { msg, type MsgKey } from './messages';
+import { maxImagesForContext } from './tuning';
 import { assemblePrompt, loadPersonaFiles } from './persona';
 import type { SettingsStore } from './storage';
 
@@ -18,6 +19,22 @@ export interface ChatControllerDeps {
   personaDir: string;
   lang(): UiLang;
   log?: (...args: unknown[]) => void;
+}
+
+/** Why a projector-equipped model cannot read images right now (see LoadedInfo.visionNote). */
+function noVisionKey(note: string | undefined): MsgKey {
+  switch (note) {
+    case 'blocked':
+      return 'noVisionBlocked';
+    case 'unavailable':
+      return 'noVisionUnavailable';
+    case 'failed':
+      return 'noVisionFailed';
+    case 'projector':
+      return 'noVisionProjector';
+    default:
+      return 'noVision';
+  }
 }
 
 interface ActiveRequest {
@@ -108,11 +125,27 @@ export class ChatController {
 
       const settings = await this.deps.settings.get();
       const files = await loadPersonaFiles(this.deps.personaDir);
+      const info = this.deps.host.getLoadedInfo();
+      // Images: only for a vision engine, and no more per message than the context window of THIS machine can hold.
+      const newest = messages[messages.length - 1];
+      const newImages = newest && newest.role === 'user' ? (newest.images?.length ?? 0) : 0;
+      const hasAnyImage = messages.some((m) => (m.images?.length ?? 0) > 0);
+      if (hasAnyImage && !info?.vision) {
+        send<ErrorEvent>(IPC.evChatError, { requestId, message: msg(noVisionKey(info?.visionNote), lang) });
+        settle();
+        return;
+      }
+      const maxImages = maxImagesForContext(info?.contextSize ?? 4096);
+      if (newImages > maxImages) {
+        send<ErrorEvent>(IPC.evChatError, { requestId, message: msg('tooManyImages', lang, String(maxImages)) });
+        settle();
+        return;
+      }
       const { systemPrompt, turns } = assemblePrompt({
         files,
         dialect: settings.dialect,
         history: messages,
-        contextSize: this.deps.host.getLoadedInfo()?.contextSize
+        maxImages
       });
       if (turns.length === 0) {
         send<ErrorEvent>(IPC.evChatError, { requestId, message: msg('generateFailed', lang, 'empty message') });
@@ -124,14 +157,6 @@ export class ChatController {
         settle();
         return;
       }
-      // Images need a vision-capable engine + projector; say so clearly instead of silently ignoring them.
-      const info = this.deps.host.getLoadedInfo();
-      if (turns.some((t) => t.images && t.images.length > 0) && !info?.vision) {
-        send<ErrorEvent>(IPC.evChatError, { requestId, message: msg('noVision', lang, info?.visionNote ?? '') });
-        settle();
-        return;
-      }
-
       this.deps.host.generate(
         requestId,
         { systemPrompt, turns, sampling: { temperature: settings.temperature, maxTokens: settings.maxTokens } },

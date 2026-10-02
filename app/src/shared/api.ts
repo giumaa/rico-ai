@@ -1,4 +1,4 @@
-﻿// IPC contract between main (Agent A) and renderer (Agent B).
+// IPC contract between main (Agent A) and renderer (Agent B).
 // Exposed in the renderer as `window.rico` via contextBridge.
 
 export type ThemePref = 'system' | 'dark' | 'light';
@@ -37,6 +37,16 @@ export interface ModelEntry {
   source: 'catalog' | 'imported';
   /** true when the model (with its mmproj projector) can see images. */
   supportsVision?: boolean;
+  /**
+   * Max images main accepts in ONE user message with this model on this machine (0 = text only). It shrinks on
+   * small-RAM machines because every image costs ~1000 tokens of a small context window. Main rejects more
+   * with a clear error; the renderer should disable attaching beyond it (added by Agent A).
+   */
+  maxImages?: number;
+  /** Long edge in px the renderer should downscale images to for this model/device (added by Agent A). */
+  maxImageEdge?: number;
+  /** Installed, but the catalog now describes different bytes (same file names): offer "update" (added by Agent A). */
+  updateAvailable?: boolean;
   /** Human-readable reason when status === 'error' (added by Agent A, optional). */
   error?: string;
 }
@@ -50,7 +60,7 @@ export interface DownloadProgress {
   error?: string;
 }
 
-/** Image attached by the user. The renderer downsizes to â‰¤1280px on the long edge before sending. */
+/** Image attached by the user. The renderer downsizes to ≤1280px on the long edge before sending. */
 export interface ImageAttachment {
   id: string;
   mime: 'image/png' | 'image/jpeg' | 'image/webp';

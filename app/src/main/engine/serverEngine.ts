@@ -15,7 +15,7 @@ import { constants as osConstants, setPriority } from 'node:os';
 import type { ModelLoadState } from '../../shared/api';
 import { readGgufBasics } from '../gguf';
 import { StreamEmitter } from '../streamEmitter';
-import { perfProfile, pickContextSize, SMALL_VRAM_GB } from '../tuning';
+import { imageMaxTokensForContext, perfProfile, pickContextSize, pickVisionContextSize, SMALL_VRAM_GB } from '../tuning';
 import { EngineError } from './errors';
 import type { LoadedInfo, LoadParams, WorkerHardware } from './protocol';
 import {
@@ -26,7 +26,9 @@ import {
   dropOldestPair,
   errorMessageFromBody,
   isContextOverflow,
+  isPortCollision,
   readChunk,
+  serverEnv,
   SseParser,
   trimTurnsToFit
 } from './serverCore';
@@ -96,6 +98,8 @@ function requestText(port: number, key: string, method: string, path: string, ti
 
 export class ServerEngine implements Backend {
   private child: ChildProcess | undefined;
+  /** The process being started (not ready yet): stop()/shutdown() must be able to kill it. */
+  private starting: ChildProcess | undefined;
   private port = 0;
   private key = '';
   private stderrTail: string[] = [];
@@ -162,6 +166,7 @@ export class ServerEngine implements Backend {
       return info;
     } catch (err) {
       this.loadedInfo = undefined;
+      if (err instanceof EngineError && err.code === 'cancelled') throw err; // superseded by unload()/another load()
       await this.stop().catch(() => undefined);
       this.setState({ modelId, state: 'error', error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -180,14 +185,14 @@ export class ServerEngine implements Backend {
       modelSizeGB: params.modelSizeGB,
       blockCount: basics.blockCount ?? params.blockCount
     });
-    let contextSize = pickContextSize({
+    const ctxInput = {
       requested: params.requestedContext,
       totalRamGB: params.totalRamGB,
       modelSizeGB: params.modelSizeGB,
       trainContext: basics.contextLength
-    });
+    };
     // Images cost ~1000 tokens each: a vision model needs some head-room even on small machines.
-    if (params.mmprojPath) contextSize = Math.max(contextSize, Math.min(4096, params.requestedContext || 4096));
+    const contextSize = params.mmprojPath ? pickVisionContextSize(ctxInput) : pickContextSize(ctxInput);
 
     const firstGpu: 'auto' | number = profile.gpuLayersMax !== undefined && profile.gpuLayers === 'auto' ? profile.gpuLayersMax : profile.gpuLayers;
     const attempts: Attempt[] = [{ gpuLayers: firstGpu, contextSize, preferCpu: this.cpuOnly || profile.gpuLayers === 0 }];
@@ -201,10 +206,11 @@ export class ServerEngine implements Backend {
       if (bins.length === 0) throw new EngineError('llama-server is not installed in this build', 'unavailable');
       for (const exe of bins) {
         try {
-          return await this.startOnce(exe, params, profile.threads, profile.batchSize, att, mmprojOffload, hw, basics.contextLength);
+          return await this.startWithPortRetry(exe, params, profile.threads, profile.batchSize, att, mmprojOffload, hw, basics.contextLength);
         } catch (err) {
           lastErr = err;
           if (!(err instanceof EngineError)) throw err;
+          if (err.code === 'cancelled') throw err;
           this.log(`llama-server attempt failed (${err.code}): ${err.message}`);
           if (err.code === 'bad-file') throw err; // no retry can fix a bad model file
           if (err.code === 'oom') break; // next, smaller attempt
@@ -215,6 +221,30 @@ export class ServerEngine implements Backend {
       if (lastErr instanceof EngineError && lastErr.code === 'blocked') throw lastErr;
     }
     throw lastErr instanceof Error ? lastErr : new EngineError('Could not start llama-server', 'crashed');
+  }
+
+  /** A port taken between freePort() and the server's bind is not a crash: same binary, fresh port, no CPU-only downgrade. */
+  private async startWithPortRetry(
+    exe: string,
+    params: LoadParams,
+    threads: number,
+    batchSize: number,
+    att: Attempt,
+    mmprojOffload: boolean,
+    hw: WorkerHardware | null,
+    trainContext: number | undefined
+  ): Promise<LoadedInfo> {
+    for (let portTry = 0; ; portTry++) {
+      try {
+        return await this.startOnce(exe, params, threads, batchSize, att, mmprojOffload, hw, trainContext);
+      } catch (err) {
+        if (portTry < 3 && err instanceof EngineError && err.code === 'crashed' && isPortCollision(this.stderrTail.join('\n'))) {
+          this.log(`llama-server could not bind its port (try ${portTry + 1}), retrying on another port`);
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   private async startOnce(
@@ -238,9 +268,10 @@ export class ServerEngine implements Backend {
       batchSize,
       gpuLayers: att.gpuLayers,
       mmprojOffload: mmprojOffload && att.gpuLayers !== 0,
+      imageMaxTokens: imageMaxTokensForContext(att.contextSize),
       cacheRamMiB: params.totalRamGB >= 24 ? 1024 : 0
     });
-    const env: NodeJS.ProcessEnv = { ...process.env, LLAMA_API_KEY: key, LLAMA_ARG_OFFLINE: '1' };
+    const env = serverEnv(process.env, key, dirname(exe), process.platform);
 
     this.stderrTail = [];
     let child: ChildProcess;
@@ -251,6 +282,7 @@ export class ServerEngine implements Backend {
     } catch (err) {
       throw new EngineError(`Could not start llama-server: ${(err as Error).message}`, 'blocked');
     }
+    this.starting = child;
     const collect = (d: Buffer): void => {
       const text = d.toString('utf8').trimEnd();
       if (!text) return;
@@ -289,12 +321,20 @@ export class ServerEngine implements Backend {
 
     const deadline = Date.now() + (this.opts.startTimeoutMs ?? 15 * 60_000);
     for (;;) {
+      if (this.starting !== child) {
+        // stop()/unload()/shutdown() or another load() took over while we were waiting
+        this.expectedExit.add(child);
+        child.kill();
+        throw new EngineError('Model start was cancelled', 'cancelled');
+      }
       if (spawnError) {
+        this.starting = undefined;
         this.expectedExit.add(child);
         const code = (spawnError as NodeJS.ErrnoException).code;
         throw new EngineError(`Could not start llama-server: ${spawnError.message}`, code === 'ENOENT' ? 'unavailable' : 'blocked');
       }
       if (exited) {
+        this.starting = undefined;
         this.expectedExit.add(child);
         const tail = this.stderrTail.join('\n');
         throw new EngineError(
@@ -303,6 +343,7 @@ export class ServerEngine implements Backend {
         );
       }
       if (Date.now() > deadline) {
+        this.starting = undefined;
         this.expectedExit.add(child);
         child.kill();
         throw new EngineError('Timed out while loading the model', 'crashed');
@@ -316,6 +357,12 @@ export class ServerEngine implements Backend {
       await sleep(200);
     }
 
+    if (this.starting !== child) {
+      this.expectedExit.add(child);
+      child.kill();
+      throw new EngineError('Model start was cancelled', 'cancelled');
+    }
+    this.starting = undefined;
     this.child = child;
     this.port = port;
     this.key = key;
@@ -345,7 +392,7 @@ export class ServerEngine implements Backend {
       vision,
       engine: 'llama-server'
     };
-    if (params.mmprojPath && !vision) info.visionNote = 'The image projector could not be loaded.';
+    if (params.mmprojPath && !vision) info.visionNote = 'projector';
     return info;
   }
 
@@ -372,13 +419,18 @@ export class ServerEngine implements Backend {
   }
 
   private async stop(): Promise<void> {
-    const child = this.child;
+    const procs = [this.child, this.starting];
     this.child = undefined;
+    this.starting = undefined; // makes a pending startup poll give up and kill its process
     if (this.active) {
       this.active.aborted = true;
       this.active.req?.destroy();
     }
-    if (!child || child.exitCode !== null) return;
+    await Promise.all(procs.map((c) => this.kill(c)));
+  }
+
+  private async kill(child: ChildProcess | undefined): Promise<void> {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
     this.expectedExit.add(child);
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {

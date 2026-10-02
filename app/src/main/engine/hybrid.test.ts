@@ -8,6 +8,7 @@ import type { Backend, GenerateHandlers } from './types';
 class FakeBackend implements Backend {
   loads: LoadParams[] = [];
   unloads = 0;
+  released = 0;
   generated: string[] = [];
   failWith: EngineErrorCode | undefined;
   available = true;
@@ -24,9 +25,16 @@ class FakeBackend implements Backend {
   }
   async load(_id: string, params: LoadParams): Promise<LoadedInfo> {
     this.loads.push(params);
-    if (this.failWith) throw new EngineError(`fail ${this.failWith}`, this.failWith);
+    if (this.failWith) {
+      // like the real ServerEngine: it reports its own failure through the load state before throwing
+      this.emit({ modelId: _id, state: 'error', error: `fail ${this.failWith}` });
+      throw new EngineError(`fail ${this.failWith}`, this.failWith);
+    }
     this.info = { contextSize: 4096, threads: 4, gpuLayers: 0, gpu: 'none', engine: this.name, vision: this.name === 'llama-server' && !!params.mmprojPath };
     return this.info;
+  }
+  async release(): Promise<void> {
+    this.released++;
   }
   async unload(): Promise<void> {
     this.unloads++;
@@ -94,7 +102,7 @@ describe('HybridEngine', () => {
     sidecar.failWith = 'blocked';
     const info = await engine.load('m', params({ mmprojPath: 'mm.gguf' }));
     expect(info).toMatchObject({ engine: 'node-llama-cpp', vision: false });
-    expect(info.visionNote).toContain('blocked');
+    expect(info.visionNote).toBe('blocked');
     expect(worker.loads[0]!.mmprojPath).toBeUndefined(); // the worker can never get the projector
   });
 
@@ -107,8 +115,46 @@ describe('HybridEngine', () => {
     b.sidecar.available = false;
     const info = await b.engine.load('m', params({ mmprojPath: 'mm.gguf' }));
     expect(info).toMatchObject({ engine: 'node-llama-cpp', vision: false });
-    expect(info.visionNote).toMatch(/not installed/);
+    expect(info.visionNote).toBe('unavailable');
     expect(b.sidecar.loads).toHaveLength(0);
+  });
+
+  it('does not flash an error state while falling back from the sidecar to the worker (T1)', async () => {
+    const { engine, sidecar, states } = setup();
+    sidecar.failWith = 'blocked';
+    await engine.load('m', params({ mmprojPath: 'mm.gguf' }));
+    expect(states).toEqual(['loading', 'ready']);
+  });
+
+  it('remembers a blocked sidecar for the session and does not relaunch it on the next load / perf switch', async () => {
+    const { engine, worker, sidecar, states } = setup();
+    sidecar.failWith = 'blocked';
+    await engine.load('m', params({ mmprojPath: 'mm.gguf' }));
+    expect(sidecar.loads).toHaveLength(1);
+    sidecar.failWith = undefined; // even if it would work now, the OS decision is remembered
+    const again = await engine.load('m', params({ mmprojPath: 'mm.gguf', perfMode: 'max' }));
+    expect(sidecar.loads).toHaveLength(1);
+    expect(worker.loads).toHaveLength(2);
+    expect(again).toMatchObject({ engine: 'node-llama-cpp', vision: false, visionNote: 'blocked' });
+    expect(states).toEqual(['loading', 'ready', 'loading', 'ready']);
+  });
+
+  it('releases the probe worker once the sidecar is serving the model', async () => {
+    const { engine, worker, sidecar } = setup();
+    await engine.load('m', params());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(worker.released).toBe(1);
+    // ...but never when the worker itself is the engine
+    sidecar.failWith = 'crashed';
+    await engine.load('m', params());
+    expect(worker.released).toBe(1);
+  });
+
+  it('a load cancelled by unload()/another load is not reported as an error', async () => {
+    const { engine, sidecar, states } = setup();
+    sidecar.failWith = 'cancelled';
+    await expect(engine.load('m', params())).rejects.toMatchObject({ code: 'cancelled' });
+    expect(states).toEqual(['loading']);
   });
 
   it('does not hide real model problems behind the fallback', async () => {

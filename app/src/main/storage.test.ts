@@ -208,3 +208,47 @@ describe('chats with images', () => {
     expect((await new ChatStore(join(dir, 'chats')).get('c'))?.messages[0]?.images).toHaveLength(1);
   });
 });
+
+describe('ChatStore index.json (review item 25)', () => {
+  const big = 'A'.repeat(200_000);
+  const withImage = (id: string, updatedAt: number): Chat =>
+    ({ id, title: `t-${id}`, createdAt: 1, updatedAt, messages: [{ id: 'm', role: 'user', content: 'x', createdAt: 1, images: [{ id: 'i', mime: 'image/png', dataBase64: big }] }] }) as unknown as Chat;
+
+  it('writes an index of summaries and a restart lists chats from it without reading chat files', async () => {
+    const chats = join(dir, 'chats');
+    const first = new ChatStore(chats);
+    await first.save(withImage('a', 10));
+    await first.save(withImage('b', 20));
+    const idx = JSON.parse(await readFile(join(chats, 'index.json'), 'utf8')) as { version: number; chats: Array<{ id: string }> };
+    expect(idx.version).toBe(1);
+    expect(idx.chats.map((c) => c.id).sort()).toEqual(['a', 'b']);
+    expect(JSON.stringify(idx)).not.toContain('AAAA'); // summaries only: no message bodies / images
+
+    // corrupt one chat file: a restart must still list it (it is served from the index, nothing is parsed)
+    await writeFile(join(chats, 'a.json'), '{ not json', 'utf8');
+    const second = new ChatStore(chats);
+    expect((await second.list()).map((c) => c.id)).toEqual(['b', 'a']);
+  });
+
+  it('reconciles with the directory: picks up unknown files, drops entries whose file vanished, rebuilds a corrupt index', async () => {
+    const chats = join(dir, 'chats');
+    const s1 = new ChatStore(chats);
+    await s1.save(withImage('a', 10));
+    await s1.save(withImage('b', 20));
+    await rm(join(chats, 'a.json'));
+    await writeFile(join(chats, 'c.json'), JSON.stringify(withImage('c', 30)), 'utf8'); // e.g. restored from a backup
+    expect((await new ChatStore(chats).list()).map((c) => c.id)).toEqual(['c', 'b']);
+
+    await writeFile(join(chats, 'index.json'), '{ broken', 'utf8');
+    expect((await new ChatStore(chats).list()).map((c) => c.id)).toEqual(['c', 'b']);
+  });
+
+  it('reserves "index" as an id and keeps the index in sync on delete', async () => {
+    const chats = join(dir, 'chats');
+    const store = new ChatStore(chats);
+    await expect(store.save(withImage('index', 1))).rejects.toThrow();
+    await store.save(withImage('a', 1));
+    await store.delete('a');
+    expect((await new ChatStore(chats).list())).toEqual([]);
+  });
+});

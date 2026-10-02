@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, TriangleAlert } from 'lucide-react';
 import { useActions, useAppState } from '../../store/AppProvider';
 import { useStickToBottom } from '../../hooks/useStickToBottom';
@@ -20,11 +20,29 @@ export function ChatView() {
   const signal = `${messages.length}:${last?.content.length ?? 0}:${chatError ? 1 : 0}`;
   const { atBottom, hasNew, scrollToBottom } = useStickToBottom(scrollRef, signal, activeChatId);
 
+  // Announce a finished answer once (the message log itself is aria-live="off" so streaming tokens stay silent)
+  const [announcement, setAnnouncement] = useState('');
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    if (stream) {
+      wasStreaming.current = true;
+      setAnnouncement('');
+    } else if (wasStreaming.current) {
+      wasStreaming.current = false;
+      if (last && last.role === 'assistant' && last.content.trim()) {
+        setAnnouncement(`${t('msg.answerReady')}: ${last.content.slice(0, 600)}`);
+      }
+    }
+  }, [stream, last, t]);
+
   const empty = messages.length === 0;
   const errorHere = chatError && chatError.chatId === activeChatId ? chatError : null;
 
   return (
     <div className="chat-wrap">
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
       <div className="chat-scroll" ref={scrollRef} tabIndex={0}>
       {empty && !errorHere ? (
         <Hero onPick={(text) => void sendMessage(text)} />

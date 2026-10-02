@@ -1,15 +1,12 @@
-// Persona injection: system prompt + optional few-shot turns + dialect variant + history normalisation.
+// Persona injection: system prompt (+ dialect variant + today's date) and history normalisation.
+// The style examples live INSIDE persona/system-prompt.md (an "examples" block): they are never sent as real prior turns,
+// because a model can quote earlier turns back at the user.
 // Pure logic lives at the top (unit-tested); the small fs loader is at the bottom.
 
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import type { ChatMessage, ImageAttachment, Settings } from '../shared/api';
 import { MAX_IMAGES_IN_CONTEXT, sanitizeImages } from './images';
-
-export interface Fewshot {
-  user: string;
-  assistant: string;
-}
 
 export interface DialectOverrides {
   msa?: string;
@@ -18,7 +15,6 @@ export interface DialectOverrides {
 
 export interface PersonaFiles {
   systemPrompt?: string;
-  fewshots?: Fewshot[];
   dialectOverrides?: DialectOverrides;
 }
 
@@ -40,21 +36,6 @@ export const DEFAULT_DIALECT_OVERRIDES: Required<DialectOverrides> = {
   auto: 'طابِق لغة المستخدم ولهجته: إن كتب بالفصحى فأجبه بالفصحى، وإن كتب بلهجة عامية فأجبه بها، وإن كتب بالإنجليزية فأجبه بالإنجليزية.'
 };
 
-const MAX_FEWSHOTS = 12;
-
-export function parseFewshots(raw: unknown): Fewshot[] {
-  if (!Array.isArray(raw)) return [];
-  const out: Fewshot[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const { user, assistant } = item as Record<string, unknown>;
-    if (typeof user === 'string' && typeof assistant === 'string' && user.trim() && assistant.trim()) {
-      out.push({ user: user.trim(), assistant: assistant.trim() });
-    }
-  }
-  return out;
-}
-
 export function parseDialectOverrides(raw: unknown): DialectOverrides {
   if (!raw || typeof raw !== 'object') return {};
   const { msa, auto } = raw as Record<string, unknown>;
@@ -75,9 +56,12 @@ export function buildSystemPrompt(files: PersonaFiles, dialect: Settings['dialec
  * Makes the visible history safe for strict chat templates (Gemma/Llama/Jinja templates reject
  * non-alternating roles): drops system/empty messages, merges consecutive same-role messages, drops leading
  * assistant turns, and guarantees the last turn is from the user. A user message with only images is kept.
- * Only the most recent MAX_IMAGES_IN_CONTEXT images are sent; older ones are replaced by a short marker.
+ * Only the most recent `maxImages` images are sent; older ones are replaced by a short marker.
  */
-export function normalizeHistory(messages: ReadonlyArray<Pick<ChatMessage, 'role' | 'content' | 'images'>>): Turn[] {
+export function normalizeHistory(
+  messages: ReadonlyArray<Pick<ChatMessage, 'role' | 'content' | 'images'>>,
+  maxImages: number = MAX_IMAGES_IN_CONTEXT
+): Turn[] {
   const turns: Turn[] = [];
   for (const m of messages) {
     if (m.role !== 'user' && m.role !== 'assistant') continue;
@@ -96,7 +80,7 @@ export function normalizeHistory(messages: ReadonlyArray<Pick<ChatMessage, 'role
   }
   while (turns.length > 0 && turns[0]!.role !== 'user') turns.shift();
   while (turns.length > 0 && turns[turns.length - 1]!.role !== 'user') turns.pop();
-  limitImages(turns, MAX_IMAGES_IN_CONTEXT);
+  limitImages(turns, maxImages);
   return turns;
 }
 
@@ -119,44 +103,37 @@ export function limitImages(turns: Turn[], max: number): void {
   }
 }
 
-/** Picks the leading few-shot pairs that fit a character budget derived from the context window. */
-export function selectFewshots(fewshots: readonly Fewshot[], contextSize?: number): Fewshot[] {
-  // Arabic averages ~2.4 chars/token; spend at most ~25% of the context on examples.
-  const budget = contextSize && contextSize > 0 ? Math.floor(contextSize * 0.6) : 8000;
-  const out: Fewshot[] = [];
-  let used = 0;
-  for (const f of fewshots.slice(0, MAX_FEWSHOTS)) {
-    const cost = f.user.length + f.assistant.length;
-    if (used + cost > budget) break;
-    out.push(f);
-    used += cost;
-  }
-  return out;
-}
-
 export interface AssembleInput {
   files: PersonaFiles;
   dialect: Settings['dialect'];
   history: ReadonlyArray<Pick<ChatMessage, 'role' | 'content' | 'images'>>;
-  contextSize?: number;
+  /** Newest images kept in the prompt (depends on the context window; default MAX_IMAGES_IN_CONTEXT). */
+  maxImages?: number;
+  /** Local date for the "today" line (default: now). */
+  now?: Date;
 }
 
 export interface AssembledPrompt {
   systemPrompt: string;
-  /** few-shot turns followed by the visible history; always ends with a user turn (or is empty). */
+  /** the visible history only; always ends with a user turn (or is empty). */
   turns: Turn[];
 }
 
+/** Local calendar date as YYYY-MM-DD (not UTC: the user's "today"). */
+export function localDateString(now: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/** Appends the (offline, local-clock) date so the model never has to guess "today". */
+export function withTodayDate(systemPrompt: string, now: Date): string {
+  return `${systemPrompt}\n\nتاريخ اليوم حسب جهازك: ${localDateString(now)}`;
+}
+
 export function assemblePrompt(input: AssembleInput): AssembledPrompt {
-  const systemPrompt = buildSystemPrompt(input.files, input.dialect);
-  const history = normalizeHistory(input.history);
-  const shots = selectFewshots(input.files.fewshots ?? [], input.contextSize);
-  const turns: Turn[] = [];
-  for (const s of shots) {
-    turns.push({ role: 'user', content: s.user }, { role: 'assistant', content: s.assistant });
-  }
-  turns.push(...history);
-  return { systemPrompt, turns: history.length === 0 ? [] : turns };
+  const systemPrompt = withTodayDate(buildSystemPrompt(input.files, input.dialect), input.now ?? new Date());
+  const turns = normalizeHistory(input.history, input.maxImages);
+  return { systemPrompt, turns };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -182,14 +159,12 @@ async function readJsonIfExists(path: string): Promise<unknown> {
 
 /** Loads persona files from `dir` (re-read on every generation so edits apply without restarting). */
 export async function loadPersonaFiles(dir: string): Promise<PersonaFiles> {
-  const [prompt, shots, overrides] = await Promise.all([
+  const [prompt, overrides] = await Promise.all([
     readTextIfExists(join(dir, 'system-prompt.md')),
-    readJsonIfExists(join(dir, 'fewshots.json')),
     readJsonIfExists(join(dir, 'dialect-overrides.json'))
   ]);
   return {
     systemPrompt: prompt?.replace(/^﻿/, ''),
-    fewshots: parseFewshots(shots),
     dialectOverrides: parseDialectOverrides(overrides)
   };
 }

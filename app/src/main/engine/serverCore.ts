@@ -22,6 +22,8 @@ export interface ServerArgsInput {
   gpuLayers: 'auto' | number;
   /** false -> keep the vision projector on the CPU (saves VRAM; used for eco mode on small cards). */
   mmprojOffload: boolean;
+  /** Caps tokens per image on small context windows (dynamic-resolution vision models only). */
+  imageMaxTokens?: number;
   /** Host RAM for the prompt cache. The default (8 GiB) is far too large for an 8 GB laptop. */
   cacheRamMiB: number;
 }
@@ -31,6 +33,10 @@ export interface ServerArgsInput {
  * LLAMA_API_KEY environment variable instead.
  */
 export function buildServerArgs(i: ServerArgsInput): string[] {
+  // Vision models need n_ubatch >= the tokens of one image (non-causal attention over the whole image), so the
+  // gentle eco batch of 256 is raised to 1024 whenever a projector is loaded.
+  const batch = i.mmprojPath ? Math.max(i.batchSize, 1024) : i.batchSize;
+  const ubatch = i.mmprojPath ? 1024 : Math.min(batch, 512);
   const args = [
     '-m', i.modelPath,
     '--host', '127.0.0.1',
@@ -38,8 +44,8 @@ export function buildServerArgs(i: ServerArgsInput): string[] {
     '-c', String(i.contextSize),
     '-t', String(i.threads),
     '-tb', String(i.threads),
-    '-b', String(i.batchSize),
-    '-ub', String(Math.min(i.batchSize, 512)),
+    '-b', String(batch),
+    '-ub', String(ubatch),
     '-np', '1', // one conversation at a time: the whole context belongs to it
     '-ngl', i.gpuLayers === 'auto' ? 'auto' : String(Math.max(0, Math.floor(i.gpuLayers))),
     '--no-webui',
@@ -55,8 +61,24 @@ export function buildServerArgs(i: ServerArgsInput): string[] {
   if (i.mmprojPath) {
     args.push('--mmproj', i.mmprojPath);
     if (!i.mmprojOffload) args.push('--no-mmproj-offload');
+    if (i.imageMaxTokens) args.push('--image-max-tokens', String(i.imageMaxTokens));
   }
   return args;
+}
+
+/** Environment of the sidecar: API key (never on argv), offline, and the bundled libraries on Linux. */
+export function serverEnv(
+  base: NodeJS.ProcessEnv,
+  apiKey: string,
+  exeDir: string,
+  platform: NodeJS.Platform
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, LLAMA_API_KEY: apiKey, LLAMA_ARG_OFFLINE: '1' };
+  if (platform === 'linux') {
+    // The shared objects (libllama.so, libggml*.so, libmtmd.so) sit next to the executable.
+    env.LD_LIBRARY_PATH = [exeDir, base.LD_LIBRARY_PATH].filter(Boolean).join(':');
+  }
+  return env;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -273,6 +295,11 @@ export function serverBinaryCandidates(platform: NodeJS.Platform, arch: string, 
 
 /** NTSTATUS 0xC0E90002 / Win32 4551: "An Application Control policy has blocked this file." */
 export const WINDOWS_APP_CONTROL_EXIT_CODES = [0xc0e90002, 0xc0e90002 - 0x100000000];
+
+/** llama-server could not bind its listening socket (the port was taken by another process in the meantime). */
+export function isPortCollision(stderrTail: string): boolean {
+  return /bind|address already in use/i.test(stderrTail);
+}
 
 export function classifyServerExit(code: number | null, stderrTail: string): 'blocked' | 'oom' | 'bad-file' | 'crashed' {
   if (code !== null && WINDOWS_APP_CONTROL_EXIT_CODES.includes(code)) return 'blocked';

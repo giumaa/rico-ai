@@ -152,8 +152,11 @@ export class SettingsStore {
 
 const ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 
+/** `chats/index.json` is the summary index, so it can never be a chat id. */
+const INDEX_FILE = 'index.json';
+
 export function isSafeId(id: unknown): id is string {
-  return typeof id === 'string' && ID_RE.test(id);
+  return typeof id === 'string' && ID_RE.test(id) && id !== 'index';
 }
 
 function toRole(r: unknown): ChatMessage['role'] {
@@ -208,24 +211,51 @@ export class ChatStore {
     return join(this.dir, `${id}.json`);
   }
 
+  /**
+   * The list of chats comes from `index.json` (summaries only), so startup never parses every chat file (they can hold
+   * megabytes of base64 images). Only chat files the index does not know are read; entries whose file is gone are
+   * dropped; a missing/corrupt index is rebuilt from the directory.
+   */
   private async loadIndex(): Promise<Map<string, ChatSummary>> {
     if (this.index) return this.index;
-    const index = new Map<string, ChatSummary>();
     let names: string[] = [];
     try {
       names = await fs.readdir(this.dir);
     } catch {
       /* directory not created yet */
     }
-    for (const name of names) {
-      if (!name.endsWith('.json')) continue;
-      const id = name.slice(0, -5);
-      if (!isSafeId(id)) continue;
-      const chat = sanitizeChat(await readJsonOr<unknown>(join(this.dir, name), null));
+    const present = names.filter((n) => n.endsWith('.json') && n !== INDEX_FILE).map((n) => n.slice(0, -5)).filter(isSafeId);
+
+    const saved = await readJsonOr<{ version?: number; chats?: unknown } | null>(join(this.dir, INDEX_FILE), null);
+    const known = new Map<string, ChatSummary>();
+    if (saved && saved.version === 1 && Array.isArray(saved.chats)) {
+      for (const c of saved.chats as Array<Partial<ChatSummary>>) {
+        if (c && isSafeId(c.id) && typeof c.title === 'string' && typeof c.updatedAt === 'number') {
+          known.set(c.id, { id: c.id, title: c.title, updatedAt: c.updatedAt, ...(c.pinned ? { pinned: true } : {}) });
+        }
+      }
+    }
+
+    const index = new Map<string, ChatSummary>();
+    let changed = !saved || known.size !== present.length;
+    for (const id of present) {
+      const hit = known.get(id);
+      if (hit) {
+        index.set(id, hit);
+        continue;
+      }
+      changed = true;
+      const chat = sanitizeChat(await readJsonOr<unknown>(this.fileFor(id), null));
       if (chat && chat.id === id) index.set(id, summarize(chat));
     }
     this.index = index;
+    if (changed && present.length + known.size > 0) await this.persistIndex().catch(() => undefined);
     return index;
+  }
+
+  private persistIndex(): Promise<void> {
+    const chats = [...(this.index ?? new Map<string, ChatSummary>()).values()];
+    return atomicWriteJson(join(this.dir, INDEX_FILE), { version: 1, chats });
   }
 
   async list(): Promise<ChatSummary[]> {
@@ -245,6 +275,7 @@ export class ChatStore {
     const index = await this.loadIndex();
     await atomicWriteJson(this.fileFor(chat.id), chat);
     index.set(chat.id, summarize(chat));
+    await this.persistIndex();
   }
 
   async delete(id: string): Promise<void> {
@@ -252,6 +283,7 @@ export class ChatStore {
     const index = await this.loadIndex();
     await enqueue(this.fileFor(id), () => fs.rm(this.fileFor(id), { force: true }));
     index.delete(id);
+    await this.persistIndex();
   }
 
   async deleteAll(): Promise<void> {

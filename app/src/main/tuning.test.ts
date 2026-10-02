@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   effectiveMemoryGB,
+  imageMaxTokensForContext,
+  maxImageEdgeForContext,
+  maxImagesForContext,
   perfProfile,
   pickContextSize,
   pickGpuName,
+  pickVisionContextSize,
   recommendModelId,
   tierForMemory,
   type TierCandidate
@@ -44,6 +48,16 @@ describe('recommendModelId', () => {
     ];
     expect(recommendModelId({ totalRamGB: 16, ...cpu }, tight)).toBe('rico-lite');
     expect(recommendModelId({ totalRamGB: 32, ...cpu }, tight)).toBe('rico');
+  });
+
+  it('compares GiB RAM with the nominal decimal-GB minRamGB (x1.07 + 0.5 slack)', () => {
+    // 16 GB laptops report ~15.4 GiB: 15.4 * 1.07 + 0.5 = 16.98 >= 14 -> standard tier is fine
+    expect(recommendModelId({ totalRamGB: 15.4, ...cpu }, catalog)).toBe('rico');
+    // a "8 GB" machine with an iGPU carve-out (7.2 GiB) still gets the 8 GB tier (7.2 * 1.07 + 0.5 = 8.2)
+    expect(recommendModelId({ totalRamGB: 7.2, ...cpu }, catalog)).toBe('rico-lite');
+    // boundary: 12.6 GiB -> standard tier threshold passes, minRamGB 14 > 12.6 * 1.07 + 0.5 = 13.98 -> steps down
+    expect(recommendModelId({ totalRamGB: 12.6, ...cpu }, catalog)).toBe('rico-lite');
+    expect(recommendModelId({ totalRamGB: 12.7, ...cpu }, catalog)).toBe('rico');
   });
 
   it('falls back to the smallest model when nothing fits', () => {
@@ -157,5 +171,28 @@ describe('pickGpuName', () => {
   it('falls back to the first name for integrated-only machines', () => {
     expect(pickGpuName(['Intel(R) Iris(R) Xe Graphics'], true)).toBe('Intel(R) Iris(R) Xe Graphics');
     expect(pickGpuName([], false)).toBeUndefined();
+  });
+});
+
+describe('vision limits for small context windows (review item 12)', () => {
+  it('allows fewer images and smaller pictures when the window is small', () => {
+    expect(maxImagesForContext(4096)).toBe(2);
+    expect(maxImagesForContext(2048)).toBe(2);
+    expect(maxImagesForContext(8192)).toBe(4);
+    expect(maxImagesForContext(32768)).toBe(6);
+    expect(maxImageEdgeForContext(4096)).toBe(896);
+    expect(maxImageEdgeForContext(8192)).toBe(1280);
+    expect(imageMaxTokensForContext(4096)).toBe(512);
+    expect(imageMaxTokensForContext(8192)).toBe(512);
+    expect(imageMaxTokensForContext(16384)).toBeUndefined();
+  });
+
+  it('gives vision models head-room for image tokens even on an 8 GB machine', () => {
+    const small = { requested: 8192, totalRamGB: 7.8, modelSizeGB: 2.5 };
+    expect(pickContextSize(small)).toBe(4096);
+    expect(pickVisionContextSize(small)).toBe(4096);
+    expect(pickVisionContextSize({ requested: 2048, totalRamGB: 4, modelSizeGB: 1 })).toBeGreaterThanOrEqual(2048);
+    expect(maxImagesForContext(pickVisionContextSize(small))).toBe(2);
+    expect(maxImagesForContext(pickVisionContextSize({ requested: 16384, totalRamGB: 32, modelSizeGB: 9 }))).toBe(6);
   });
 });

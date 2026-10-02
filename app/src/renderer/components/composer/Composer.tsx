@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
 import { ArrowUp, ImagePlus, Square, X } from 'lucide-react';
 import { useActions, useAppState } from '../../store/AppProvider';
-import { visionBlocked } from '../../store/selectors';
+import { imageLimits, visionBlocked } from '../../store/selectors';
 import { useAutoGrow } from '../../hooks/useAutoGrow';
 import { useI18n } from '../../i18n/useI18n';
-import { MAX_IMAGES, imageSrc, isImageFile } from '../../lib/image';
+import { imageSrc, isImageFile } from '../../lib/image';
 
 export const COMPOSER_ID = 'composer-input';
 
@@ -25,8 +25,9 @@ export function Composer() {
   const streaming = !!stream;
 
   const noVision = visionBlocked(state);
-  const full = attachments.length + pendingImages >= MAX_IMAGES;
-  const attachLabel = noVision ? t('composer.attachDisabled') : full ? t('composer.maxImages') : t('composer.attach');
+  const { maxImages } = imageLimits(state);
+  const full = attachments.length + pendingImages >= maxImages;
+  const attachLabel = noVision ? t('composer.attachDisabled') : full ? t('composer.maxImages', { n: maxImages }) : t('composer.attach');
 
   useAutoGrow(ref, value);
 

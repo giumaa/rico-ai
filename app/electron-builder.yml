@@ -28,16 +28,33 @@ asarUnpack:
   - node_modules/node-llama-cpp/**
   - node_modules/@node-llama-cpp/**
 
+# Hardening fuses (applied and verified with  + the smoke test).
+# runAsNode stays ON on purpose: node-llama-cpp's Windows GPU (Vulkan) binary self-test calls child_process.fork() from
+# inside the engine utilityProcess, which throws when the fuse is off -> the hardware probe then reports 'no GPU' and the
+# sidecar is planned CPU-only. Turn it off once the probe no longer needs node-llama-cpp (e.g. llama-server --list-devices).
+electronFuses:
+  runAsNode: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
+
 # Only Arabic + English UI strings from Chromium (saves ~40 MB).
 electronLanguages:
   - ar
   - en-US
 
 extraResources:
-  # Persona (system prompt, few-shots, dialect overrides): read at runtime from <resources>/persona
+  # Persona (system prompt incl. its examples block, dialect overrides): read at runtime from <resources>/persona
   - from: resources/persona
     to: persona
     filter: ['**/*']
+  # Third-party license texts (Apache-2.0, Gemma prohibited use policy, llama.cpp MIT, OFL fonts) + Rico's own license
+  - from: resources/LICENSES
+    to: LICENSES
+  - from: ../LICENSE
+    to: LICENSES/Rico-LICENSE.txt
   # Model catalog: read at runtime from <resources>/catalog.json
   - from: ../models/catalog.json
     to: catalog.json
@@ -80,6 +97,9 @@ mac:
       arch: [arm64, x64]
   icon: resources/icons/icon.icns
   category: public.app-category.productivity
+  # Ad-hoc signature: arm64 apps without any signature are reported as "damaged". Users of unsigned builds run
+  # `xattr -dr com.apple.quarantine /Applications/Rico.app` once (see docs/app-engineering.md).
+  identity: '-'
   hardenedRuntime: false
   gatekeeperAssess: false
   artifactName: Rico-${version}-mac-${arch}.${ext}

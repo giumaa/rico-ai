@@ -7,6 +7,10 @@
 //   node scripts/fetch-llama-server.mjs --platform all        # CI: everything (win-x64 mac-arm64 mac-x64 linux-x64)
 //   node scripts/fetch-llama-server.mjs --variant vulkan      # only one variant (vulkan | cpu | metal | default)
 //   node scripts/fetch-llama-server.mjs --tag b11321 --force
+//   node scripts/fetch-llama-server.mjs --verify              # after fetching, run `llama-server --version` (native platform only)
+//
+// The pinned tag lives in the repo-root file LLAMA_CPP_TAG (single source of truth for CI and local builds);
+// precedence: --tag > $LLAMA_CPP_TAG > that file > the built-in default below.
 //
 // Source: https://github.com/ggml-org/llama.cpp/releases (official builds). Each archive is verified against
 // the sha256 digest GitHub publishes for the release asset. This is a build-time tool: the app itself never
@@ -14,7 +18,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -22,8 +26,8 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
-/** Pinned release. Bump deliberately: llama-server flags change between builds (see src/main/engine/serverArgs.ts). */
-const DEFAULT_TAG = 'b11321';
+/** Fallback pin when LLAMA_CPP_TAG (repo root) is missing. Bump deliberately: llama-server flags change between builds (see src/main/engine/serverCore.ts). */
+const BUILTIN_TAG = 'b11321';
 const REPO = 'ggml-org/llama.cpp';
 
 /** platform -> variants -> asset name builder */
@@ -43,11 +47,23 @@ const PLATFORMS = {
 const here = dirname(fileURLToPath(import.meta.url));
 const binRoot = resolve(here, '..', 'resources', 'bin');
 
+function readPinnedTag() {
+  try {
+    const t = readFileSync(resolve(here, '..', '..', 'LLAMA_CPP_TAG'), 'utf8').trim();
+    if (/^b\d+$/.test(t)) return t;
+  } catch {
+    /* no file: use the built-in pin */
+  }
+  return BUILTIN_TAG;
+}
+const DEFAULT_TAG = readPinnedTag();
+
 function parseArgs(argv) {
-  const out = { platform: 'current', variant: 'all', tag: process.env.LLAMA_CPP_TAG || DEFAULT_TAG, force: false };
+  const out = { platform: 'current', variant: 'all', tag: process.env.LLAMA_CPP_TAG || DEFAULT_TAG, force: false, verify: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--force') out.force = true;
+    else if (a === '--verify') out.verify = true;
     else if (a === '--platform') out.platform = argv[++i];
     else if (a === '--variant') out.variant = argv[++i];
     else if (a === '--tag') out.tag = argv[++i];
@@ -135,6 +151,20 @@ async function prune(dir, serverExe) {
   }
 }
 
+/** Runs `llama-server --version` from the installed folder. Only meaningful (and only attempted) on the native platform. */
+function verifyOne(platform, entry) {
+  if (platform !== currentPlatform()) {
+    console.log(`[fetch-llama-server] --verify: skipping ${platform}/${entry.variant} (cannot run a ${platform} binary on ${currentPlatform()})`);
+    return;
+  }
+  const dest = join(binRoot, platform, entry.variant);
+  const exe = join(dest, platform.startsWith('win') ? 'llama-server.exe' : 'llama-server');
+  const r = spawnSync(exe, ['--version'], { cwd: dest, encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split(/\r?\n/)[0] ?? '';
+  if (r.status !== 0 || r.error) throw new Error(`--verify failed for ${platform}/${entry.variant}: ${r.error?.message ?? `exit ${r.status}`} ${out}`);
+  console.log(`[fetch-llama-server] --verify ok: ${platform}/${entry.variant}: ${out}`);
+}
+
 async function installOne(platform, entry, tag, force) {
   const dest = join(binRoot, platform, entry.variant);
   const exe = platform.startsWith('win') ? 'llama-server.exe' : 'llama-server';
@@ -171,7 +201,7 @@ async function installOne(platform, entry, tag, force) {
 
     await rm(dest, { recursive: true, force: true });
     await mkdir(dest, { recursive: true });
-    await cp(dirname(serverPath), dest, { recursive: true });
+    await cp(dirname(serverPath), dest, { recursive: true, verbatimSymlinks: true });
     await prune(dest, exe);
     await writeFile(marker, `${tag}\n`);
     console.log(`[fetch-llama-server] installed ${platform}/${entry.variant} -> ${dest}`);
@@ -183,7 +213,7 @@ async function installOne(platform, entry, tag, force) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(`Usage: node scripts/fetch-llama-server.mjs [--platform ${Object.keys(PLATFORMS).join('|')}|all|current] [--variant vulkan|cpu|metal|default|all] [--tag ${DEFAULT_TAG}] [--force]`);
+    console.log(`Usage: node scripts/fetch-llama-server.mjs [--platform ${Object.keys(PLATFORMS).join('|')}|all|current] [--variant vulkan|cpu|metal|default|all] [--tag ${DEFAULT_TAG}] [--force] [--verify]`);
     return;
   }
   const platforms = args.platform === 'all' ? Object.keys(PLATFORMS) : [args.platform === 'current' ? currentPlatform() : args.platform];
@@ -192,7 +222,10 @@ async function main() {
     if (!entries) throw new Error(`Unsupported platform "${platform}". Supported: ${Object.keys(PLATFORMS).join(', ')}`);
     const wanted = entries.filter((e) => args.variant === 'all' || e.variant === args.variant);
     if (wanted.length === 0) throw new Error(`No variant "${args.variant}" for ${platform}`);
-    for (const entry of wanted) await installOne(platform, entry, args.tag, args.force);
+    for (const entry of wanted) {
+      await installOne(platform, entry, args.tag, args.force);
+      if (args.verify) verifyOne(platform, entry);
+    }
   }
 }
 

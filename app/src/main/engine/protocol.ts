@@ -30,6 +30,8 @@ export interface LoadParams {
   blockCount?: number;
 }
 
+export type VisionIssue = 'blocked' | 'unavailable' | 'failed' | 'projector';
+
 export interface LoadedInfo {
   contextSize: number;
   threads: number;
@@ -39,8 +41,8 @@ export interface LoadedInfo {
   wrapper?: string;
   /** true when the loaded engine can accept image input. */
   vision?: boolean;
-  /** Why vision is unavailable although the model has a projector (shown to the user). */
-  visionNote?: string;
+  /** Why vision is unavailable although the model has a projector (main turns it into a localised message). */
+  visionNote?: VisionIssue;
   /** Which engine runs the model. */
   engine?: 'llama-server' | 'node-llama-cpp';
 }

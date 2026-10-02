@@ -221,6 +221,26 @@ describe('ServerEngine (against a fake llama-server)', () => {
     expect(r.error?.code).toBe('no-model');
   });
 
+  it('unload()/shutdown() during startup kills the starting process and cancels the load without an error state (review item 5)', async () => {
+    const states: string[] = [];
+    engine.onLoadState((st) => states.push(st.state));
+    const loading = engine.load('m', params());
+    const settled = loading.then(() => 'loaded', (e: unknown) => (e as { code?: string }).code);
+    await new Promise((r) => setTimeout(r, 40)); // spawned, not healthy yet (the fake needs ~150 ms)
+    await engine.unload();
+    expect(await settled).toBe('cancelled');
+    expect(states).not.toContain('error');
+    expect(engine.getLoadState()).toEqual({ state: 'idle' });
+    // nothing is left running: the engine can start a fresh server right away
+    const info = await engine.load('m2', params());
+    expect(info.engine).toBe('llama-server');
+    // and shutdown() while a start is in flight cancels it as well
+    const second = engine.load('m3', params()).then(() => 'loaded', (e: unknown) => (e as { code?: string }).code);
+    await new Promise((r) => setTimeout(r, 40));
+    await engine.shutdown();
+    expect(await second).toBe('cancelled');
+  });
+
   describe('startup failures', () => {
     it('gives up immediately on a bad model file', async () => {
       extraEnv = { FAKE_MODE: 'bad-file' };
@@ -244,6 +264,34 @@ describe('ServerEngine (against a fake llama-server)', () => {
       extraEnv = { FAKE_MODE: 'blocked' };
       engine = make();
       await expect(engine.load('m', params())).rejects.toMatchObject({ code: 'blocked' });
+    });
+
+    it('retries the SAME binary on a new port when the port was taken (no CPU-only downgrade)', async () => {
+      extraEnv = { FAKE_MODE: 'port-taken-once', FAKE_MARKER_FILE: join(dir, 'marker') };
+      const cpuAsked: boolean[] = [];
+      engine = new ServerEngine({
+        binaries: (preferCpu) => {
+          cpuAsked.push(preferCpu);
+          return [FAKE];
+        },
+        hardware: async () => ({ gpuType: 'vulkan', vramGB: 12, physicalCores: 6, logicalCores: 12 }),
+        startTimeoutMs: 15_000,
+        lowerPriority: false,
+        launch: (exe, args, env) =>
+          spawn(process.execPath, [exe, ...args], {
+            env: { ...env, ...extraEnv, FAKE_ARGS_FILE: argsFile, FAKE_RECORD_FILE: recordFile },
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true
+          })
+      });
+      const info = await engine.load('m', params({ perfMode: 'max' }));
+      expect(info.engine).toBe('llama-server');
+      const launches = (await readFile(argsFile, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { args: string[] });
+      expect(launches).toHaveLength(2);
+      const portOf = (l: { args: string[] }): string => l.args[l.args.indexOf('--port') + 1]!;
+      expect(portOf(launches[0]!)).not.toBe(portOf(launches[1]!));
+      expect(cpuAsked.every((c) => !c) || cpuAsked.length === 1).toBe(true);
+      expect(launches[0]!.args.filter((a) => a !== portOf(launches[0]!))).toEqual(launches[1]!.args.filter((a) => a !== portOf(launches[1]!)));
     });
 
     it('reports "unavailable" when no binary is installed', async () => {

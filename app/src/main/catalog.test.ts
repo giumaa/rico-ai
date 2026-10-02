@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   isValidModelId,
@@ -113,5 +115,50 @@ describe('split GGUF shards', () => {
     );
     expect(primaryModelFileName(['only.gguf'])).toBe('only.gguf');
     expect(primaryModelFileName(['notes.txt'])).toBeUndefined();
+  });
+});
+
+describe('packaged fallback convention (files[0].fallbackUrl + fallbackSha256)', () => {
+  it('turns it into a complete fallbackFiles set and strips per-shard fallbacks', () => {
+    const c = parseCatalog({
+      models: [
+        {
+          id: 'm',
+          files: [
+            { url: 'https://gh/m-00001-of-00002.gguf', sha256: 'a', sizeBytes: 10, fallbackUrl: 'https://hf/m.gguf', fallbackSha256: 'b', fallbackSizeBytes: 25 },
+            { url: 'https://gh/m-00002-of-00002.gguf', sha256: 'c', sizeBytes: 15, fallbackUrl: 'https://hf/m.gguf' }
+          ],
+          mmproj: { url: 'https://gh/mm.gguf', fallbackUrl: 'https://hf/mm.gguf', sha256: 'd', sizeBytes: 5 }
+        }
+      ]
+    });
+    const m = c.models[0]!;
+    expect(m.fallbackFiles).toEqual([{ url: 'https://hf/m.gguf', sha256: 'b', sizeBytes: 25 }]);
+    expect(m.files.every((f) => f.fallbackUrl === undefined && f.fallbackSha256 === undefined)).toBe(true);
+    expect(m.mmproj?.fallbackUrl).toBe('https://hf/mm.gguf'); // the projector keeps its per-file fallback
+  });
+
+  it('keeps the simple per-file fallback for single files without a fallback checksum, and respects explicit fallbackFiles', () => {
+    const single = parseCatalog({ models: [{ id: 'm', files: [{ url: 'https://a/1.gguf', fallbackUrl: 'https://b/1.gguf' }] }] }).models[0]!;
+    expect(single.files[0]!.fallbackUrl).toBe('https://b/1.gguf');
+    expect(single.fallbackFiles).toBeUndefined();
+    const explicit = parseCatalog({
+      models: [{ id: 'm', files: [{ url: 'https://a/1.gguf', fallbackUrl: 'https://b/1.gguf', fallbackSha256: 'x' }], fallbackFiles: [{ url: 'https://c/1.gguf' }] }]
+    }).models[0]!;
+    expect(explicit.fallbackFiles).toEqual([{ url: 'https://c/1.gguf' }]);
+  });
+
+  it('the real models/catalog.json yields a usable single-file fallback for every model', () => {
+    const raw = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'models', 'catalog.json'), 'utf8')) as unknown;
+    const catalog = parseCatalog(raw);
+    expect(catalog.models.length).toBeGreaterThan(0);
+    for (const m of catalog.models) {
+      expect(m.files.length, m.id).toBeGreaterThan(0);
+      for (const f of m.files) expect(f.fallbackUrl, `${m.id} shard ${f.url}`).toBeUndefined();
+      expect(m.fallbackFiles, m.id).toHaveLength(1);
+      expect(m.fallbackFiles![0]!.sha256, m.id).toMatch(/^[0-9a-f]{64}$/);
+      expect(m.fallbackFiles![0]!.sizeBytes, m.id).toBeGreaterThan(0);
+      expect(m.mmproj?.url, m.id).toBeTruthy();
+    }
   });
 });

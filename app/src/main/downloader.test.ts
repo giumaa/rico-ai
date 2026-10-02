@@ -275,3 +275,92 @@ describe('downloadFile (local server)', () => {
     await expect(run({ http: {} })).rejects.toThrow(/non-HTTPS/);
   });
 });
+
+describe('downloadFile: verified marker and progress-aware retries (review items 4, 21)', () => {
+  const body = randomBytes(200_000);
+  const sha = createHash('sha256').update(body).digest('hex');
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rico-dl2-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('writes a .verified marker and does not re-hash a verified file on the next run', async () => {
+    const srv = await startServer(body);
+    try {
+      let hashed = 0;
+      const run = () =>
+        downloadFile({
+          url: `${srv.url}/file.bin`,
+          destPath: join(dir, 'm.gguf'),
+          sha256: sha,
+          signal: new AbortController().signal,
+          onBytes: () => undefined,
+          onVerifying: () => hashed++,
+          retryDelayMs: () => 0,
+          http: { allowInsecureLocalhost: true }
+        });
+      await run();
+      expect(hashed).toBe(1);
+      expect((await stat(join(dir, 'm.gguf.verified'))).isFile()).toBe(true);
+      await run();
+      expect(hashed).toBe(1); // marker hit: no second hash
+      // a modified file invalidates the marker (size/mtime change) and is re-verified (and replaced)
+      await writeFile(join(dir, 'm.gguf'), Buffer.concat([body.subarray(0, 100), randomBytes(body.length - 100)]));
+      await run();
+      expect(hashed).toBe(3); // stale marker -> hash (mismatch) -> download -> hash again
+      expect(Buffer.compare(await readFile(join(dir, 'm.gguf')), body)).toBe(0);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('resets the retry counter whenever an attempt made progress (flaky connection finishes, a dead one still fails)', async () => {
+    let requests = 0;
+    const flaky = http.createServer((req, res) => {
+      requests++;
+      const m = /^bytes=(\d+)-$/.exec(req.headers.range ?? '');
+      const start = m ? Number(m[1]) : 0;
+      const slice = body.subarray(start);
+      res.writeHead(start ? 206 : 200, {
+        'Content-Length': String(slice.length),
+        ...(start ? { 'Content-Range': `bytes ${start}-${body.length - 1}/${body.length}` } : {})
+      });
+      if (slice.length > 30_000) {
+        res.write(slice.subarray(0, 30_000));
+        setTimeout(() => res.destroy(), 10); // every attempt delivers 30 KB, then the connection dies
+      } else {
+        res.end(slice);
+      }
+    });
+    await new Promise<void>((r) => flaky.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(flaky.address() as AddressInfo).port}/f`;
+    try {
+      // 200 KB needs 7 attempts; with maxRetries = 2 this only works if progress resets the counter
+      await downloadFile({ url, destPath: join(dir, 'a.gguf'), sha256: sha, signal: new AbortController().signal, onBytes: () => undefined, retryDelayMs: () => 0, maxRetries: 2, http: { allowInsecureLocalhost: true } });
+      expect(Buffer.compare(await readFile(join(dir, 'a.gguf')), body)).toBe(0);
+      expect(requests).toBeGreaterThanOrEqual(7);
+    } finally {
+      flaky.closeAllConnections?.();
+      await new Promise<void>((r) => flaky.close(() => r()));
+    }
+
+    // no progress at all -> gives up after maxRetries consecutive failures
+    let dead = 0;
+    const down = http.createServer((_req, res) => {
+      dead++;
+      res.writeHead(503).end();
+    });
+    await new Promise<void>((r) => down.listen(0, '127.0.0.1', r));
+    try {
+      await expect(
+        downloadFile({ url: `http://127.0.0.1:${(down.address() as AddressInfo).port}/x`, destPath: join(dir, 'b.gguf'), signal: new AbortController().signal, onBytes: () => undefined, retryDelayMs: () => 0, maxRetries: 3, http: { allowInsecureLocalhost: true } })
+      ).rejects.toBeInstanceOf(HttpStatusError);
+      expect(dead).toBe(4); // first try + 3 retries
+    } finally {
+      await new Promise<void>((r) => down.close(() => r()));
+    }
+  });
+});

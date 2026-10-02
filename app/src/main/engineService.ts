@@ -29,10 +29,13 @@ export function toUserError(err: unknown, lang: UiLang, fallbackKey: 'modelLoadF
         return new Error(msg('outOfMemory', lang));
       case 'bad-file':
         return new Error(msg('badModelFile', lang));
-      case 'crashed':
       case 'blocked':
+        return new Error(msg('engineBlocked', lang));
+      case 'crashed':
       case 'unavailable':
         return new Error(msg('engineCrashed', lang));
+      case 'cancelled':
+        return new Error(msg('loading', lang));
       default:
         return new Error(msg(fallbackKey, lang, err.message));
     }
@@ -111,6 +114,8 @@ export class EngineService {
       await this.loading;
       return;
     }
+    // Other loads kept superseding ours: say so instead of silently pretending the model is ready.
+    throw new RicoError('loading', this.deps.lang());
   }
 
   /** Persists the choice, then loads the model. Resolves once it is ready. */

@@ -4,6 +4,7 @@
 // Layout:  <modelsDir>/<modelId>/manifest.json + the .gguf file(s)   (partials are "<file>.part")
 
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { totalmem } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -27,14 +28,19 @@ import {
   classifyError,
   downloadFile,
   DownloadCancelledError,
+  isSourceFailure,
   PART_SUFFIX,
   SizeMismatchError,
+  VERIFIED_SUFFIX,
   type HttpOptions
 } from './downloader';
 import { msg, RicoError } from './messages';
 import { atomicWriteJson, readJsonOr } from './storage';
+import { maxImageEdgeForContext, maxImagesForContext, pickVisionContextSize } from './tuning';
 
 const GiB = 1024 ** 3;
+/** Catalog `sizeGB` values are decimal gigabytes (what download pages and the file sizes show). */
+const GB = 1e9;
 const MANIFEST = 'manifest.json';
 const DISK_MARGIN_BYTES = 256 * 1024 * 1024;
 const PROGRESS_INTERVAL_MS = 250;
@@ -43,7 +49,7 @@ const SPEED_WINDOW_MS = 4000;
 export interface Manifest {
   id: string;
   source: 'catalog' | 'imported';
-  files: { name: string; sizeBytes: number }[];
+  files: { name: string; sizeBytes: number; /** verified sha256 (catalog installs) */ sha256?: string }[];
   primary: string;
   totalBytes: number;
   installedAt: number;
@@ -75,6 +81,8 @@ export interface ModelManagerDeps {
   http?: Pick<HttpOptions, 'allowInsecureLocalhost' | 'idleTimeoutMs'>;
   retryDelayMs?: (attempt: number) => number;
   now?: () => number;
+  /** Total RAM in GB (test hook); used to tell the UI how many images fit this machine's context window. */
+  totalRamGB?: () => number;
   freeDiskBytes?: (dir: string) => Promise<number | undefined>;
 }
 
@@ -104,6 +112,10 @@ export class ProgressTracker {
     this.samples.push({ t, bytes: this.receivedBytes() });
     const cutoff = t - SPEED_WINDOW_MS;
     while (this.samples.length > 2 && this.samples[0]!.t < cutoff) this.samples.shift();
+  }
+
+  receivedOf(index: number): number {
+    return this.received[index] ?? 0;
   }
 
   receivedBytes(): number {
@@ -191,6 +203,28 @@ export class ModelManager {
     return sets;
   }
 
+  /** sha256 the CURRENT catalog expects per local file name, for the file set that matches the manifest. */
+  private expectedShas(model: CatalogModel, manifest: Manifest): Map<string, string | undefined> {
+    const have = manifest.files.map((f) => f.name).sort().join('|');
+    for (const files of [model.files, ...(model.fallbackFiles?.length ? [model.fallbackFiles] : [])]) {
+      const names = files.map((f, i) => localFileName(f, i));
+      const out = new Map<string, string | undefined>(files.map((f, i) => [names[i]!, f.sha256]));
+      if (model.mmproj) out.set(mmprojFileName(model.mmproj, names), model.mmproj.sha256);
+      if ([...out.keys()].sort().join('|') === have) return out;
+    }
+    return new Map();
+  }
+
+  /** Installed, but the catalog now describes different bytes under the same file names. */
+  private needsUpdate(model: CatalogModel | undefined, manifest: Manifest): boolean {
+    if (!model || manifest.source !== 'catalog') return false;
+    const expected = this.expectedShas(model, manifest);
+    return manifest.files.some((f) => {
+      const want = expected.get(f.name);
+      return !!want && !!f.sha256 && want.toLowerCase() !== f.sha256.toLowerCase();
+    });
+  }
+
   /**
    * A catalog model counts as installed only if what is on disk is what the CURRENT catalog describes
    * (an upgraded catalog entry, e.g. a text model replaced by a vision model, shows up as "not installed" again).
@@ -240,7 +274,9 @@ export class ModelManager {
         status,
         isActive: activeId === m.id && status === 'installed',
         source: 'catalog',
-        supportsVision: !!m.mmproj
+        supportsVision: !!m.mmproj,
+        ...this.visionLimits(!!m.mmproj, m.contextLength, m.sizeGB),
+        ...(manifest && status === 'installed' && this.needsUpdate(m, manifest) ? { updateAvailable: true } : {})
       };
       if (progress !== undefined) entry.progress = progress;
       if (error) entry.error = error;
@@ -274,7 +310,8 @@ export class ModelManager {
         status: job ? 'downloading' : 'installed',
         isActive: activeId === id,
         source: 'imported',
-        supportsVision: !!manifest?.mmproj
+        supportsVision: !!manifest?.mmproj,
+        ...this.visionLimits(!!manifest?.mmproj, manifest?.contextLength ?? 8192, sizeGB)
       };
       if (job?.tracker) {
         entry.progress = job.tracker.totalBytes() > 0 ? Math.min(1, job.tracker.receivedBytes() / job.tracker.totalBytes()) : 0;
@@ -282,6 +319,21 @@ export class ModelManager {
       entries.push(entry);
     }
     return entries;
+  }
+
+  /** Images per message / long edge that fit the context window this machine will actually give the model. */
+  private visionLimits(vision: boolean, contextLength: number, sizeGB: number): { maxImages: number; maxImageEdge?: number } {
+    if (!vision) return { maxImages: 0 };
+    const input = { requested: contextLength, totalRamGB: this.deps.totalRamGB?.() ?? totalmem() / GiB, modelSizeGB: sizeGB };
+    const ctx = pickVisionContextSize(input);
+    return { maxImages: maxImagesForContext(ctx), maxImageEdge: maxImageEdgeForContext(ctx) };
+  }
+
+  /** True when the model is installed but the catalog now describes different bytes (see ModelEntry.updateAvailable). */
+  async hasUpdate(id: string): Promise<boolean> {
+    const catalog = await this.deps.loadCatalog();
+    const manifest = await this.installedManifest(id, catalog);
+    return !!manifest && this.needsUpdate(catalog.models.find((m) => m.id === id), manifest);
   }
 
   async isInstalled(id: string): Promise<boolean> {
@@ -353,14 +405,17 @@ export class ModelManager {
     this.jobs.set(modelId, job);
 
     let model: CatalogModel | undefined;
+    let isUpdate = false;
     try {
       const catalog = await this.deps.loadCatalog();
       model = catalog.models.find((m) => m.id === modelId);
       if (!model || model.files.length === 0) throw new RicoError('unknownModel', this.lang);
-      if (await this.installedManifest(modelId, catalog)) {
+      const current = await this.installedManifest(modelId, catalog);
+      if (current && !this.needsUpdate(model, current)) {
         this.jobs.delete(modelId);
         return;
       }
+      isUpdate = !!current;
     } catch (err) {
       this.jobs.delete(modelId);
       throw err;
@@ -375,7 +430,7 @@ export class ModelManager {
       const p: DownloadProgress = {
         modelId,
         receivedBytes: t?.receivedBytes() ?? 0,
-        totalBytes: t?.totalBytes() ?? Math.round(model!.sizeGB * GiB),
+        totalBytes: t?.totalBytes() ?? Math.round(model!.sizeGB * GB),
         bytesPerSecond: status === 'downloading' ? (t?.bytesPerSecond() ?? 0) : 0,
         status
       };
@@ -393,13 +448,16 @@ export class ModelManager {
       for (let s = 0; s < sets.length; s++) {
         const files = sets[s]!;
         try {
-          installed = await this.runFileSet(model, files, dir, job, controller.signal, emit);
+          installed = await this.runFileSet(model, files, dir, job, controller.signal, emit, isUpdate);
           break;
         } catch (err) {
           lastErr = err;
           if (controller.signal.aborted || classifyError(err) === 'cancelled') throw err;
-          // Discard partial data of the failed set before trying the complete alternative set.
-          if (s < sets.length - 1) await this.cleanPartials(dir, files);
+          const next = sets[s + 1];
+          // Switch to the complete alternative set ONLY when the primary source is really unusable (403/404/410, wrong
+          // checksum/size). Offline, timeouts, 5xx, disk errors: keep every byte and let the user retry/resume.
+          if (!next || !isSourceFailure(err)) throw err;
+          await this.discardPrimarySet(dir, files, next, model);
         }
       }
       if (!installed) throw lastErr ?? new Error('Download failed');
@@ -433,6 +491,17 @@ export class ModelManager {
     }
   }
 
+  /** Frees the disk space of a primary set that turned out to be unusable (completed shards, partials) before the fallback set is fetched. */
+  private async discardPrimarySet(dir: string, primary: CatalogFile[], fallback: CatalogFile[], model: CatalogModel): Promise<void> {
+    const keep = new Set(fallback.map((f, i) => localFileName(f, i)));
+    const primaryNames = primary.map((f, i) => localFileName(f, i));
+    if (model.mmproj) keep.add(mmprojFileName(model.mmproj, primaryNames)); // the projector is shared by both sets
+    for (const name of primaryNames) {
+      if (keep.has(name)) continue;
+      for (const suffix of ['', PART_SUFFIX, VERIFIED_SUFFIX]) await fs.rm(join(dir, name + suffix), { force: true }).catch(() => undefined);
+    }
+  }
+
   private describeDownloadError(err: unknown): string {
     if (err instanceof RicoError) return err.message;
     if (err instanceof ChecksumError) return msg('checksumFailed', this.lang);
@@ -444,19 +513,14 @@ export class ModelManager {
     return msg('downloadFailed', this.lang, err instanceof Error ? err.message : String(err));
   }
 
-  private async cleanPartials(dir: string, files: CatalogFile[]): Promise<void> {
-    await Promise.all(
-      files.map((f, i) => fs.rm(join(dir, localFileName(f, i) + PART_SUFFIX), { force: true }).catch(() => undefined))
-    );
-  }
-
   private async runFileSet(
     model: CatalogModel,
     files: CatalogFile[],
     dir: string,
     job: Job,
     signal: AbortSignal,
-    emit: (status: DownloadProgress['status'], error?: string, force?: boolean) => void
+    emit: (status: DownloadProgress['status'], error?: string, force?: boolean) => void,
+    isUpdate = false
   ): Promise<Manifest> {
     const modelNames = files.map((f, i) => localFileName(f, i));
     const mmprojName = model.mmproj ? mmprojFileName(model.mmproj, modelNames) : undefined;
@@ -467,17 +531,21 @@ export class ModelManager {
     const tracker = new ProgressTracker(
       files.length,
       files.map((f) => f.sizeBytes),
-      Math.round(model.sizeGB * GiB),
+      Math.round(model.sizeGB * GB),
       this.deps.now
     );
     job.tracker = tracker;
 
     // Disk space: everything not yet on disk.
     let alreadyOnDisk = 0;
-    for (const n of names) {
+    for (const [i, n] of names.entries()) {
       for (const suffix of ['', PART_SUFFIX]) {
         try {
-          alreadyOnDisk += (await fs.stat(join(dir, n + suffix))).size;
+          const size = (await fs.stat(join(dir, n + suffix))).size;
+          alreadyOnDisk += size;
+          // Seed the progress bar with what is already there so a resumed download never flashes back to 0%.
+          // (An old file that is being replaced by an update is not progress.)
+          if (suffix === PART_SUFFIX || !isUpdate) tracker.update(i, Math.max(size, tracker.receivedOf(i)), null);
         } catch {
           /* missing */
         }
@@ -514,9 +582,9 @@ export class ModelManager {
         } catch (err) {
           lastErr = err;
           if (signal.aborted || classifyError(err) === 'cancelled') throw err;
-          // A different source may serve different bytes: never resume its partial data from another URL.
-          await fs.rm(dest + PART_SUFFIX, { force: true }).catch(() => undefined);
-          tracker.update(i, 0, file.sizeBytes ?? null);
+          // The mirror (same bytes, same sha256) is only for a source that is really gone/wrong, never for being offline.
+          if (!isSourceFailure(err)) throw err;
+          // The same file behind another URL resumes from the partial data; a bad partial is removed by downloadFile itself.
         }
       }
       if (!ok) throw lastErr ?? new Error('Download failed');
@@ -528,7 +596,7 @@ export class ModelManager {
     return {
       id: model.id,
       source: 'catalog',
-      files: names.map((name, i) => ({ name, sizeBytes: sizes[i]! })),
+      files: names.map((name, i) => ({ name, sizeBytes: sizes[i]!, ...(files[i]?.sha256 ? { sha256: files[i]!.sha256!.toLowerCase() } : {}) })),
       primary,
       totalBytes: sizes.reduce((a, b) => a + b, 0),
       installedAt: Date.now(),

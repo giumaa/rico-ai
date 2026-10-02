@@ -2,7 +2,7 @@ import type { ImageAttachment } from '@shared/api';
 import { uid } from './text';
 
 export const MAX_IMAGES = 4;
-const MAX_EDGE = 1280;
+export const MAX_EDGE_DEFAULT = 1280;
 const JPEG_QUALITY = 0.85;
 
 /** SVG is excluded on purpose (scriptable); everything else the browser can decode is accepted. */
@@ -52,14 +52,14 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
- * Downscale to ≤1280px on the long edge and re-encode as JPEG (q 0.85) so every attachment is
+ * Downscale to ≤1280px (≤896px for small-context models) on the long edge and re-encode as JPEG (q 0.85) so every attachment is
  * small and in a format any vision backend can read. Transparent areas are flattened onto white.
  */
-export async function fileToAttachment(file: File): Promise<ImageAttachment> {
+export async function fileToAttachment(file: File, maxEdge = MAX_EDGE_DEFAULT): Promise<ImageAttachment> {
   const { source, width, height, release } = await decode(file);
   try {
     if (!width || !height) throw new Error('empty image');
-    const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
+    const scale = Math.min(1, maxEdge / Math.max(width, height));
     const w = Math.max(1, Math.round(width * scale));
     const h = Math.max(1, Math.round(height * scale));
     const canvas = document.createElement('canvas');

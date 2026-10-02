@@ -12,6 +12,7 @@ import {
   platformDirName,
   readChunk,
   serverBinaryCandidates,
+  serverEnv,
   SseParser,
   toOpenAiMessages,
   trimTurnsToFit
@@ -231,5 +232,35 @@ describe('classifyServerExit', () => {
     expect(classifyServerExit(1, 'failed to allocate CPU buffer of size 123')).toBe('oom');
     expect(classifyServerExit(1, 'error loading model: invalid magic characters')).toBe('bad-file');
     expect(classifyServerExit(139, '')).toBe('crashed');
+  });
+});
+
+describe('vision batch size and image tokens (review items 10-12)', () => {
+  const base = { modelPath: 'm.gguf', port: 1, contextSize: 4096, threads: 4, batchSize: 256, gpuLayers: 'auto' as const, mmprojOffload: true, cacheRamMiB: 0 };
+  const val = (args: string[], flag: string): string => args[args.indexOf(flag) + 1]!;
+
+  it('raises -b/-ub to at least 1024 whenever a projector is loaded (eco batch 256 would break image attention)', () => {
+    const vision = buildServerArgs({ ...base, mmprojPath: 'mm.gguf' });
+    expect(val(vision, '-b')).toBe('1024');
+    expect(val(vision, '-ub')).toBe('1024');
+    const text = buildServerArgs(base);
+    expect(val(text, '-b')).toBe('256');
+    expect(val(text, '-ub')).toBe('256');
+    expect(val(buildServerArgs({ ...base, mmprojPath: 'mm.gguf', batchSize: 2048 }), '-b')).toBe('2048');
+  });
+
+  it('caps image tokens on small windows, only for vision models', () => {
+    expect(val(buildServerArgs({ ...base, mmprojPath: 'mm.gguf', imageMaxTokens: 512 }), '--image-max-tokens')).toBe('512');
+    expect(buildServerArgs({ ...base, imageMaxTokens: 512 })).not.toContain('--image-max-tokens');
+    expect(buildServerArgs({ ...base, mmprojPath: 'mm.gguf' })).not.toContain('--image-max-tokens');
+  });
+
+  it('puts the bundled libraries on LD_LIBRARY_PATH on Linux only, and the key in the environment', () => {
+    const linux = serverEnv({ PATH: '/bin', LD_LIBRARY_PATH: '/old' }, 'k', '/opt/rico/bin', 'linux');
+    expect(linux.LD_LIBRARY_PATH).toBe('/opt/rico/bin:/old');
+    expect(linux.LLAMA_API_KEY).toBe('k');
+    expect(serverEnv({}, 'k', '/opt/x', 'linux').LD_LIBRARY_PATH).toBe('/opt/x');
+    expect(serverEnv({}, 'k', 'C:/x', 'win32').LD_LIBRARY_PATH).toBeUndefined();
+    expect(serverEnv({}, 'k', '/x', 'darwin').LLAMA_ARG_OFFLINE).toBe('1');
   });
 });

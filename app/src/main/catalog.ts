@@ -5,6 +5,9 @@ export interface CatalogFile {
   fallbackUrl?: string;
   sha256?: string;
   sizeBytes?: number;
+  /** sha256 / size of the bytes behind `fallbackUrl` when they differ from the primary file (e.g. a single HF GGUF vs. GitHub shards). */
+  fallbackSha256?: string;
+  fallbackSizeBytes?: number;
   /** Local file name. Defaults to the last path segment of `url` (important for split shards). */
   name?: string;
 }
@@ -68,11 +71,37 @@ function parseFiles(raw: unknown): CatalogFile[] {
     if (sha) file.sha256 = sha;
     const size = num(r.sizeBytes);
     if (size !== undefined && size > 0) file.sizeBytes = Math.round(size);
+    const fbSha = str(r.fallbackSha256);
+    if (fbSha) file.fallbackSha256 = fbSha;
+    const fbSize = num(r.fallbackSizeBytes);
+    if (fbSize !== undefined && fbSize > 0) file.fallbackSizeBytes = Math.round(fbSize);
     const name = str(r.name);
     if (name) file.name = name;
     out.push(file);
   }
   return out;
+}
+
+/**
+ * Catalog convention for GitHub-packaged models ("packaged": shards on GitHub, original single GGUF on Hugging Face):
+ * files[0].fallbackUrl (+ fallbackSha256 / fallbackSizeBytes) describes ONE replacement file for the WHOLE shard set.
+ * Per-file fallbackUrl is therefore turned into a complete `fallbackFiles` set (the single HF file is never compared
+ * with shard 1's size/sha) and removed from the shards. Single-file entries without a fallback checksum keep the
+ * simple per-file fallbackUrl behaviour. (mmproj keeps its own per-file fallbackUrl.)
+ */
+function derivePackagedFallback(model: CatalogModel): void {
+  const f0 = model.files[0];
+  if (!f0 || !f0.fallbackUrl || model.fallbackFiles) return;
+  if (!(f0.fallbackSha256 || model.files.length > 1)) return;
+  const alt: CatalogFile = { url: f0.fallbackUrl };
+  if (f0.fallbackSha256) alt.sha256 = f0.fallbackSha256;
+  if (f0.fallbackSizeBytes) alt.sizeBytes = f0.fallbackSizeBytes;
+  model.fallbackFiles = [alt];
+  for (const f of model.files) {
+    delete f.fallbackUrl;
+    delete f.fallbackSha256;
+    delete f.fallbackSizeBytes;
+  }
 }
 
 /** Tolerant parser: invalid models are skipped, missing optional fields get sensible defaults. */
@@ -97,6 +126,7 @@ export function parseCatalog(raw: unknown): Catalog {
       };
       const fallbackFiles = parseFiles(o.fallbackFiles);
       if (fallbackFiles.length > 0) model.fallbackFiles = fallbackFiles;
+      derivePackagedFallback(model);
       const mmproj = parseFiles(o.mmproj ? [o.mmproj] : [])[0];
       if (mmproj) model.mmproj = mmproj;
       const hint = str(o.chatTemplateHint);

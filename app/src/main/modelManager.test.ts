@@ -219,6 +219,49 @@ describe('ModelManager', () => {
     expect(target?.modelPath.endsWith('single.gguf')).toBe(true);
   });
 
+  it('packaged catalog shape: a missing GitHub shard switches to the single Hugging Face file, deletes the primary shards first', async () => {
+    const [s1, s2] = [body.subarray(0, 120_000), body.subarray(120_000)];
+    srv = await serve({ '/m-00001-of-00002.gguf': s1, '/single.gguf': body }); // shard 2 is missing (404)
+    catalog = parseCatalog({
+      models: [
+        {
+          id: 'm',
+          sizeGB: 0.0002,
+          files: [
+            { url: `${srv.url}/m-00001-of-00002.gguf`, sha256: sha(s1), sizeBytes: s1.length, fallbackUrl: `${srv.url}/single.gguf`, fallbackSha256: sha(body), fallbackSizeBytes: body.length },
+            { url: `${srv.url}/m-00002-of-00002.gguf`, sha256: sha(s2), sizeBytes: s2.length, fallbackUrl: null }
+          ]
+        }
+      ]
+    });
+    await mk().download('m');
+    const names = (await readdir(join(dir, 'models', 'm'))).sort();
+    expect(names).toEqual(['manifest.json', 'single.gguf']); // shard 1 was removed, not left to waste 2.7 GB
+    expect((await mk().resolveForLoad('m'))?.modelPath.endsWith('single.gguf')).toBe(true);
+  });
+
+  it('does NOT switch to the fallback set when the primary is merely offline / failing transiently (and keeps the .part)', async () => {
+    srv = await serve({ '/single.gguf': body, '/flaky.gguf': 503 });
+    // an unused local port: connection refused = offline-like
+    const probe = http.createServer();
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
+    const deadPort = (probe.address() as AddressInfo).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    for (const primary of [`http://127.0.0.1:${deadPort}/a.gguf`, `${srv.url}/flaky.gguf`]) {
+      catalog = parseCatalog({
+        models: [
+          {
+            id: 'm',
+            sizeGB: 0.0002,
+            files: [{ url: primary, sha256: sha(body), fallbackUrl: `${srv.url}/single.gguf`, fallbackSha256: sha(body), fallbackSizeBytes: body.length }]
+          }
+        ]
+      });
+      await expect(mk().download('m')).rejects.toThrow();
+      expect(srv.hits['/single.gguf']).toBeUndefined();
+    }
+  });
+
   it('reports a localised error, marks the model as errored and allows a retry', async () => {
     srv = await serve({ '/a.gguf': body });
     catalog = parseCatalog({

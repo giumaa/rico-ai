@@ -9,9 +9,9 @@ import {
   FALLBACK_SYSTEM_PROMPT,
   loadPersonaFiles,
   normalizeHistory,
+  localDateString,
   parseDialectOverrides,
-  parseFewshots,
-  selectFewshots
+  withTodayDate
 } from './persona';
 
 describe('buildSystemPrompt', () => {
@@ -70,68 +70,67 @@ describe('normalizeHistory', () => {
   });
 });
 
-describe('parseFewshots / parseDialectOverrides', () => {
-  it('keeps only well-formed pairs', () => {
-    expect(
-      parseFewshots([{ user: ' u ', assistant: ' a ' }, { user: 'only' }, null, 5, { user: '', assistant: 'x' }])
-    ).toEqual([{ user: 'u', assistant: 'a' }]);
-    expect(parseFewshots('nope')).toEqual([]);
-  });
-
+describe('parseDialectOverrides', () => {
   it('reads msa/auto strings only', () => {
     expect(parseDialectOverrides({ msa: 'm', auto: 3 })).toEqual({ msa: 'm' });
     expect(parseDialectOverrides(null)).toEqual({});
   });
 });
 
-describe('selectFewshots', () => {
-  const shots = Array.from({ length: 20 }, (_, i) => ({ user: `u${i}`.padEnd(100, 'x'), assistant: `a${i}`.padEnd(100, 'y') }));
-
-  it('caps the number of examples', () => {
-    expect(selectFewshots(shots, 1_000_000).length).toBe(12);
+describe('today line', () => {
+  it('formats the LOCAL calendar date as YYYY-MM-DD', () => {
+    expect(localDateString(new Date(2026, 0, 5, 23, 59))).toBe('2026-01-05');
+    expect(localDateString(new Date(2026, 11, 31, 0, 0))).toBe('2026-12-31');
   });
-
-  it('respects a budget derived from the context window', () => {
-    // 4096 * 0.6 = 2457 chars; each pair costs 200 chars -> 12 pairs max anyway; shrink the context
-    expect(selectFewshots(shots, 1000).length).toBe(3); // 600 chars
-    expect(selectFewshots(shots, 100).length).toBe(0);
+  it('appends it to the system prompt', () => {
+    expect(withTodayDate('SYS', new Date(2026, 9, 2))).toBe('SYS\n\nتاريخ اليوم حسب جهازك: 2026-10-02');
   });
 });
 
 describe('assemblePrompt', () => {
-  const files = {
-    systemPrompt: 'SYS',
-    fewshots: [{ user: 'fu', assistant: 'fa' }]
-  };
+  const files = { systemPrompt: 'SYS' };
+  const now = new Date(2026, 9, 2, 12, 0);
 
-  it('puts few-shot turns before the visible history and ends with the user turn', () => {
+  it('sends ONLY the visible history as turns (style examples live in the system prompt, never as fake prior turns)', () => {
     const { systemPrompt, turns } = assemblePrompt({
       files,
       dialect: 'libyan',
+      now,
       history: [
         { role: 'user', content: 'q1' },
         { role: 'assistant', content: 'a1' },
         { role: 'user', content: 'q2' }
       ]
     });
-    expect(systemPrompt).toBe('SYS');
-    expect(turns.map((t) => `${t.role}:${t.content}`)).toEqual([
-      'user:fu',
-      'assistant:fa',
-      'user:q1',
-      'assistant:a1',
-      'user:q2'
-    ]);
+    expect(systemPrompt).toBe('SYS\n\nتاريخ اليوم حسب جهازك: 2026-10-02');
+    expect(turns.map((t) => `${t.role}:${t.content}`)).toEqual(['user:q1', 'assistant:a1', 'user:q2']);
   });
 
   it('returns no turns for an empty history (nothing to answer)', () => {
     expect(assemblePrompt({ files, dialect: 'libyan', history: [] }).turns).toEqual([]);
   });
 
-  it('applies the dialect variant', () => {
-    const { systemPrompt } = assemblePrompt({ files, dialect: 'msa', history: [{ role: 'user', content: 'x' }] });
+  it('applies the dialect variant before the date line', () => {
+    const { systemPrompt } = assemblePrompt({ files, dialect: 'msa', now, history: [{ role: 'user', content: 'x' }] });
     expect(systemPrompt.startsWith('SYS\n\n')).toBe(true);
     expect(systemPrompt).toContain(DEFAULT_DIALECT_OVERRIDES.msa);
+    expect(systemPrompt.endsWith('تاريخ اليوم حسب جهازك: 2026-10-02')).toBe(true);
+  });
+
+  it('limits the images kept in the prompt to what the context window allows', () => {
+    const img = { id: 'a', mime: 'image/png' as const, dataBase64: 'QUJDREVGR0g=' };
+    const { turns } = assemblePrompt({
+      files,
+      dialect: 'libyan',
+      maxImages: 2,
+      history: [
+        { role: 'user', content: 'one', images: [img] },
+        { role: 'assistant', content: 'r' },
+        { role: 'user', content: 'two', images: [img, { ...img, id: 'b' }] }
+      ]
+    });
+    expect(turns[0]!.images).toBeUndefined();
+    expect(turns[2]!.images).toHaveLength(2);
   });
 });
 
@@ -147,17 +146,15 @@ describe('loadPersonaFiles', () => {
   it('returns usable defaults when the folder is empty', async () => {
     const f = await loadPersonaFiles(dir);
     expect(f.systemPrompt).toBeUndefined();
-    expect(f.fewshots).toEqual([]);
     expect(buildSystemPrompt(f, 'libyan')).toBe(FALLBACK_SYSTEM_PROMPT);
   });
 
-  it('reads the three persona files (tolerating a BOM and broken JSON)', async () => {
+  it('reads the persona files (tolerating a BOM, broken JSON and a leftover fewshots.json)', async () => {
     await writeFile(join(dir, 'system-prompt.md'), '﻿أنت ريكو', 'utf8');
     await writeFile(join(dir, 'fewshots.json'), JSON.stringify([{ user: 'a', assistant: 'b' }]), 'utf8');
     await writeFile(join(dir, 'dialect-overrides.json'), '{ not json', 'utf8');
     const f = await loadPersonaFiles(dir);
     expect(f.systemPrompt).toBe('أنت ريكو');
-    expect(f.fewshots).toEqual([{ user: 'a', assistant: 'b' }]);
     expect(f.dialectOverrides).toEqual({});
   });
 });

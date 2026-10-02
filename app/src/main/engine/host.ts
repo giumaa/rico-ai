@@ -34,6 +34,7 @@ export class EngineHost implements Engine {
   private cpuOnly = false;
   private stderrTail: string[] = [];
   private shuttingDown = false;
+  private releasing = false;
 
   private state: ModelLoadState = { state: 'idle' };
   private loadedInfo: LoadedInfo | undefined;
@@ -133,7 +134,7 @@ export class EngineHost implements Engine {
   }
 
   private handleExit(code: number): void {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || this.releasing) return;
     const tail = this.stderrTail.join('\n');
     this.log(`engine exited with code ${code}`, tail);
     const err = new EngineError(`The AI engine stopped unexpectedly (code ${code})`, 'crashed');
@@ -289,6 +290,33 @@ export class EngineHost implements Engine {
 
   hasActiveGeneration(): boolean {
     return this.generations.size > 0;
+  }
+
+  /**
+   * Stops the worker process but leaves the engine usable (it respawns on demand). Used when the llama-server sidecar
+   * is the active engine, so the probe worker's Vulkan context does not keep VRAM busy on small cards.
+   */
+  async release(): Promise<void> {
+    const child = this.child;
+    if (!child || this.generations.size > 0 || this.pendingLoad.size > 0) return;
+    this.releasing = true;
+    this.child = undefined;
+    try {
+      child.postMessage({ type: 'shutdown' } satisfies ToWorker);
+    } catch {
+      /* already gone */
+    }
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(() => {
+        child.kill();
+        resolve();
+      }, 1500);
+      child.once('exit', () => {
+        clearTimeout(t);
+        resolve();
+      });
+    });
+    this.releasing = false;
   }
 
   /** Stops the worker (used on app quit and to free memory). */

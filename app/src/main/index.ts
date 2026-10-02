@@ -104,7 +104,7 @@ async function bootstrap(): Promise<void> {
     lang: () => lang,
     pickModelFile: async () => {
       const opts: Electron.OpenDialogOptions = {
-        title: lang === 'ar' ? 'اختر ملف النموذج (GGUF)' : 'Choose a model file (GGUF)',
+        title: lang === 'ar' ? 'اختار ملف النموذج (GGUF)' : 'Choose a model file (GGUF)',
         properties: ['openFile'],
         filters: [{ name: 'GGUF', extensions: ['gguf'] }]
       };

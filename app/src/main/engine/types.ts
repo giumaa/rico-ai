@@ -26,6 +26,8 @@ export interface Backend {
   getLoadedInfo(): LoadedInfo | undefined;
   onLoadState(cb: (s: ModelLoadState) => void): () => void;
   shutdown(): Promise<void>;
+  /** Optional: free the process/memory while keeping the backend usable later (no "shutting down" state). */
+  release?(): Promise<void>;
 }
 
 /** What the rest of the app talks to. */

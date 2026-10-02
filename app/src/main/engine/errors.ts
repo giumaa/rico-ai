@@ -8,6 +8,8 @@ export type EngineErrorCode =
   | 'blocked'
   /** The llama-server sidecar binary is not installed in this build. */
   | 'unavailable'
+  /** load()/start was superseded by unload()/shutdown()/another load(): not a failure. */
+  | 'cancelled'
   | 'other';
 
 export class EngineError extends Error {

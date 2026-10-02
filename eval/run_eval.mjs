@@ -118,7 +118,7 @@ function buildMessages(prompt, setting) {
 }
 
 async function generate(endpoint, item) {
-  const body = { model: args.model || 'rico', messages: buildMessages(item.prompt, args.setting || item.dialect_setting || 'libyan'), temperature: Number(args.temperature ?? 0.7), max_tokens: Number(args['max-tokens'] ?? 768), stream: false };
+  const body = { model: args.model || 'rico', messages: buildMessages(item.prompt, args.setting || item.dialect_setting || 'libyan'), temperature: Number(args.temperature ?? 0.7), max_tokens: Number(args['max-tokens'] ?? 768), stream: false, chat_template_kwargs: { enable_thinking: false } };
   const res = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   const j = await res.json();

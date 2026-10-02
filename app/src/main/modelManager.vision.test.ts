@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -203,5 +203,130 @@ describe('ModelManager with vision models', () => {
       picked = join(dir, 'mmproj-x-f16.gguf');
       await expect(mm.importFile()).rejects.toThrow(/projector/i);
     });
+  });
+});
+
+describe('ModelManager: updates, progress seeding, partial retention, vision limits (review items 4, 12, 19, T2)', () => {
+  let dir: string;
+  let srv: Awaited<ReturnType<typeof serve>>;
+  let events: DownloadProgress[];
+  let catalog: Catalog;
+  let ram = 16;
+
+  const mk = (): ModelManager =>
+    new ModelManager({
+      modelsDir: join(dir, 'models'),
+      loadCatalog: async () => catalog,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS }),
+      emitProgress: (p) => events.push(p),
+      pickModelFile: async () => null,
+      lang: () => 'en',
+      http: { allowInsecureLocalhost: true },
+      retryDelayMs: () => 0,
+      freeDiskBytes: async () => undefined,
+      totalRamGB: () => ram
+    });
+
+  const v1 = gguf(120_000);
+  const v2 = gguf(120_000); // same name + size, different bytes
+  const proj = gguf(40_000);
+  const cat = (modelSha: string): Catalog =>
+    parseCatalog({
+      models: [
+        {
+          id: 'rico-lite',
+          sizeGB: 0.0002,
+          contextLength: 8192,
+          files: [{ url: `${srv.url}/model.gguf`, sizeBytes: v1.length, sha256: modelSha }],
+          mmproj: { url: `${srv.url}/mmproj.gguf`, sizeBytes: proj.length, sha256: sha(proj) }
+        }
+      ]
+    });
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rico-upd-'));
+    events = [];
+    ram = 16;
+  });
+  afterEach(async () => {
+    await srv?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('stores sha256 per file and offers an update when the catalog changes bytes under the same file names', async () => {
+    srv = await serve({ '/model.gguf': v1, '/mmproj.gguf': proj });
+    catalog = cat(sha(v1));
+    const mm = mk();
+    await mm.download('rico-lite');
+    const manifest = JSON.parse(await readFile(join(dir, 'models', 'rico-lite', 'manifest.json'), 'utf8')) as { files: Array<{ name: string; sha256?: string }> };
+    expect(manifest.files.map((f) => f.sha256)).toEqual([sha(v1), sha(proj)]);
+    expect((await mm.list())[0]).toMatchObject({ status: 'installed' });
+    expect((await mm.list())[0]!.updateAvailable).toBeUndefined();
+    expect(await mm.hasUpdate('rico-lite')).toBe(false);
+
+    // catalog now ships different bytes under the same names
+    await srv.close();
+    srv = await serve({ '/model.gguf': v2, '/mmproj.gguf': proj });
+    catalog = cat(sha(v2));
+    expect((await mm.list())[0]).toMatchObject({ status: 'installed', updateAvailable: true });
+    expect(await mm.hasUpdate('rico-lite')).toBe(true);
+
+    await mm.download('rico-lite'); // replaces the old file instead of returning "already installed"
+    expect(await readFile(join(dir, 'models', 'rico-lite', 'model.gguf'))).toEqual(v2);
+    expect((await mm.list())[0]!.updateAvailable).toBeUndefined();
+    expect(JSON.parse(await readFile(join(dir, 'models', 'rico-lite', 'manifest.json'), 'utf8')).files[0].sha256).toBe(sha(v2));
+  });
+
+  it('does not flag legacy manifests without sha256 (nothing to compare)', async () => {
+    srv = await serve({ '/model.gguf': v1, '/mmproj.gguf': proj });
+    catalog = cat(sha(v1));
+    const mm = mk();
+    await mm.download('rico-lite');
+    const mp = join(dir, 'models', 'rico-lite', 'manifest.json');
+    const m = JSON.parse(await readFile(mp, 'utf8')) as { files: Array<{ sha256?: string }> };
+    for (const f of m.files) delete f.sha256;
+    await writeFile(mp, JSON.stringify(m));
+    catalog = cat(sha(v2));
+    expect(await mm.hasUpdate('rico-lite')).toBe(false);
+  });
+
+  it('seeds the progress bar from partial files: a resumed download never starts at 0% (T2)', async () => {
+    srv = await serve({ '/model.gguf': v1, '/mmproj.gguf': proj });
+    catalog = cat(sha(v1));
+    await mkdir(join(dir, 'models', 'rico-lite'), { recursive: true });
+    await writeFile(join(dir, 'models', 'rico-lite', 'model.gguf.part'), v1.subarray(0, 90_000));
+    await mk().download('rico-lite');
+    const first = events.find((e) => e.status === 'downloading')!;
+    expect(first.receivedBytes).toBeGreaterThanOrEqual(90_000);
+    expect(first.totalBytes).toBe(v1.length + proj.length);
+    const received = events.filter((e) => e.status === 'downloading').map((e) => e.receivedBytes);
+    for (let i = 1; i < received.length; i++) expect(received[i]!).toBeGreaterThanOrEqual(received[i - 1]!); // never goes backwards
+  });
+
+  it('keeps partial data when every URL failed, so the next attempt resumes (item 4)', async () => {
+    srv = await serve({ '/model.gguf': v1 }); // the projector is missing -> the download fails after the model finished
+    catalog = cat(sha(v1));
+    const mm = mk();
+    await expect(mm.download('rico-lite')).rejects.toThrow();
+    const names = await readdir(join(dir, 'models', 'rico-lite'));
+    expect(names).toContain('model.gguf'); // finished shard kept
+    srv.hits['/model.gguf'] = 0;
+    await srv.close();
+    srv = await serve({ '/model.gguf': v1, '/mmproj.gguf': proj });
+    catalog = cat(sha(v1));
+    await mm.download('rico-lite');
+    expect(srv.hits['/model.gguf'] ?? 0).toBe(0); // not downloaded again
+    expect((await mm.list())[0]!.status).toBe('installed');
+  });
+
+  it('tells the UI how many images fit this machine (item 12)', async () => {
+    srv = await serve({});
+    catalog = cat(sha(v1));
+    ram = 7.8;
+    expect((await mk().list())[0]).toMatchObject({ supportsVision: true, maxImages: 2, maxImageEdge: 896 });
+    ram = 32;
+    expect((await mk().list())[0]).toMatchObject({ maxImages: 4, maxImageEdge: 1280 });
+    catalog = parseCatalog({ models: [{ id: 't', sizeGB: 1, files: [{ url: 'https://x/t.gguf' }] }] });
+    expect((await mk().list())[0]).toMatchObject({ supportsVision: false, maxImages: 0 });
   });
 });

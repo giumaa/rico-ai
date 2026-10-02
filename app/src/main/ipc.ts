@@ -64,6 +64,12 @@ export function registerIpc(d: IpcDeps): void {
   handle(IPC.modelsList, (): Promise<ModelEntry[]> => d.models.list());
   handle(IPC.modelsDownload, async (_e, modelId: unknown) => {
     const id = str(modelId, 'model id');
+    // Updating a model that is currently loaded: release its files first (Windows cannot replace a mapped file).
+    const state = d.host.getLoadState();
+    if (state.modelId === id && state.state !== 'idle' && (await d.models.hasUpdate(id))) {
+      await d.chat.stopAll();
+      await d.host.unload();
+    }
     await d.models.download(id);
     await activateIfFirst(id);
   });
@@ -110,10 +116,8 @@ export function registerIpc(d: IpcDeps): void {
       nativeTheme.themeSource = next.theme;
     }
     d.onSettingsChanged(next, prev);
-    // A different performance mode applies from the next reply on (reloaded lazily, never mid-generation).
-    if (next.perfMode !== prev.perfMode && d.engine.getLoadState().state === 'ready' && !d.host.hasActiveGeneration()) {
-      void d.engine.ensureLoaded().catch((err) => d.log?.('reload after perf change failed', err));
-    }
+    // A different performance mode applies lazily: ensureLoaded() reloads the model on the next generate() (never
+    // mid-generation, never a surprise multi-GB reload while the user is just browsing settings).
     return next;
   });
 

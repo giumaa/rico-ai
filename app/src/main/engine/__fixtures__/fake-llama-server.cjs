@@ -26,6 +26,15 @@ if (mode === 'bad-file') {
   console.error('error loading model: invalid magic characters');
   process.exit(1);
 }
+if (mode === 'port-taken-once') {
+  // first start: pretend the port was grabbed by someone else between freePort() and bind
+  const marker = process.env.FAKE_MARKER_FILE;
+  if (marker && !fs.existsSync(marker)) {
+    fs.writeFileSync(marker, '1');
+    console.error("couldn't bind HTTP server socket, hostname: 127.0.0.1, port: " + port);
+    process.exit(1);
+  }
+}
 if (mode === 'blocked') {
   console.error('An Application Control policy has blocked this file.');
   process.exit(1);

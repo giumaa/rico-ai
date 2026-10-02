@@ -8,7 +8,6 @@ import type {
   Settings,
   SystemInfo,
 } from '@shared/api';
-import { MAX_IMAGES } from '../lib/image';
 import type {
   AppState,
   LoadState,
@@ -54,11 +53,11 @@ export type Action =
   | {
       type: 'BOOTED';
       settings: Settings;
-      system: SystemInfo | null;
       chatIndex: ChatSummary[];
       models: ModelEntry[];
       loadState: LoadState;
     }
+  | { type: 'SYSTEM'; system: SystemInfo | null }
   | { type: 'SETTINGS'; settings: Settings }
   | { type: 'SETTINGS_PATCH'; patch: Partial<Settings> }
   | { type: 'CHAT_LOADED'; chat: Chat }
@@ -91,7 +90,7 @@ export type Action =
   | { type: 'DOWNLOAD_CLEAR'; modelId: string }
   | { type: 'TOAST_PUSH'; toast: Toast }
   | { type: 'TOAST_REMOVE'; id: string }
-  | { type: 'ATTACH_ADD'; images: ImageAttachment[] }
+  | { type: 'ATTACH_ADD'; images: ImageAttachment[]; max: number }
   | { type: 'ATTACH_REMOVE'; id: string }
   | { type: 'ATTACH_CLEAR' }
   | { type: 'ATTACH_PENDING'; delta: number };
@@ -135,7 +134,6 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         booted: true,
         settings: { ...DEFAULT_SETTINGS, ...action.settings },
-        system: action.system,
         chatIndex: action.chatIndex,
         models: action.models,
         modelsLoaded: true,
@@ -143,6 +141,8 @@ export function reducer(state: AppState, action: Action): AppState {
         onboarding: !action.models.some((m) => m.status === 'installed'),
       };
 
+    case 'SYSTEM':
+      return { ...state, system: action.system };
     case 'SETTINGS':
       return { ...state, settings: { ...state.settings, ...action.settings } };
     case 'SETTINGS_PATCH':
@@ -317,7 +317,7 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, toasts: state.toasts.filter((t) => t.id !== action.id) };
 
     case 'ATTACH_ADD':
-      return { ...state, attachments: [...state.attachments, ...action.images].slice(0, MAX_IMAGES) };
+      return { ...state, attachments: [...state.attachments, ...action.images].slice(0, action.max) };
     case 'ATTACH_REMOVE':
       return { ...state, attachments: state.attachments.filter((a) => a.id !== action.id) };
     case 'ATTACH_CLEAR':

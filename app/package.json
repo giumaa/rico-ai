@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "description": "Rico (ريكو) — a fully offline AI assistant. Developed and trained by Juma Abouras.",
   "author": "Juma Abouras",
-  "homepage": "https://github.com/rico-ai/rico-ai",
-  "license": "UNLICENSED",
+  "homepage": "https://github.com/giumaa/rico-ai",
+  "license": "MIT",
   "private": true,
   "main": "./out/main/index.js",
   "engines": {
