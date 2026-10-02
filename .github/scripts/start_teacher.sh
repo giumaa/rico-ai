@@ -4,7 +4,7 @@
 set -euo pipefail
 : "${LLAMA_BIN:?LLAMA_BIN not set}"
 : "${TEACHER_GGUF:?TEACHER_GGUF not set}"
-PARALLEL="${PARALLEL:-6}"
+PARALLEL="${PARALLEL:-2}"
 CTX_PER_SLOT="${CTX_PER_SLOT:-3072}"
 PORT="${PORT:-8080}"
 
@@ -15,6 +15,7 @@ pkill -f llama-server 2>/dev/null || true
 export LD_LIBRARY_PATH="${LLAMA_BIN}:${LD_LIBRARY_PATH:-}"
 nohup "${LLAMA_BIN}/llama-server" -m "${TEACHER_GGUF}" \
   -c $((PARALLEL * CTX_PER_SLOT)) -np "${PARALLEL}" -t 4 -tb 4 \
+  -fa on --cache-type-k q8_0 --cache-type-v q8_0 --no-mmap \
   --host 127.0.0.1 --port "${PORT}" --no-webui --jinja \
   --chat-template-kwargs '{"enable_thinking": false}' \
   > "${RUNNER_TEMP:-/tmp}/llama-server.log" 2>&1 &

@@ -47,7 +47,7 @@ on:
         default: "0.7"
       parallel:
         description: "Concurrent requests per job (= llama-server slots)"
-        default: "6"
+        default: "2"
       teacher_url:
         description: "Teacher GGUF URL"
         default: "https://huggingface.co/lmstudio-community/gemma-4-12B-it-GGUF/resolve/main/gemma-4-12B-it-Q4_K_M.gguf"
@@ -124,7 +124,7 @@ jobs:
       PARALLEL: ${{ inputs.parallel }}
       CHUNK_MINUTES: ${{ inputs.chunk_minutes }}
       TEACHER_NAME: ${{ inputs.teacher_name }}
-      CTX_PER_SLOT: "4096"
+      CTX_PER_SLOT: "3072"
     steps:
       - uses: actions/checkout@v7
 
