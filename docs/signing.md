@@ -33,13 +33,14 @@
    * variable **`SIGNPATH_ENABLED` = `true`** ← the switch. While it is not `true` nothing in the workflow touches SignPath.
 
 ## What the workflow does when enabled (`.github/workflows/build-app.yml`)
-1. `llama-source` builds `llama-server` from source at the pinned llama.cpp tag (`b11321`, same as `app/scripts/fetch-llama-server.mjs`) – Windows/Linux: Vulkan + all CPU variants as loadable backends, macOS arm64: Metal, macOS x64: CPU – into `resources/bin/<os>-<arch>/<variant>/` (the same layout the app expects). It also runs automatically on manual dispatch with *llama_from_source = true*.
+1. `llama-source` builds `llama-server` from source at the pinned llama.cpp tag (repo-root file `LLAMA_CPP_TAG`, shared with `app/scripts/fetch-llama-server.mjs` and all workflows) – Windows/Linux: Vulkan + all CPU variants as loadable backends, macOS arm64: Metal, macOS x64: CPU – into `resources/bin/<os>-<arch>/<variant>/` (the same layout the app expects). It also runs automatically on manual dispatch with *llama_from_source = true*.
 2. `windows-signed`: `electron-builder --dir` → zip `win-unpacked` → SignPath signs all exe/dll/node → `electron-builder --prepackaged` builds the NSIS installer from the **signed** files → SignPath signs the installer → artifact `installer-windows-x64-signed`.
 3. `release` publishes the signed installer instead of the unsigned `installer-windows-x64` for tags `v*`.
 
 ## Other platforms
-* **macOS**: real distribution needs an Apple Developer ID ($99/year) + notarization; there is no free equivalent. Current builds are ad-hoc signed (`mac.identity` in `electron-builder.yml`): users right-click → Open the first time.
-* **Linux**: AppImage/deb need no signing; checksums are published with every release (`SHA256SUMS.txt`).
+* **macOS**: real distribution needs an Apple Developer ID ($99/year) + notarization; there is no free equivalent. Current builds are ad-hoc signed (`mac.identity` in `electron-builder.yml`), so Gatekeeper says the app "is damaged / cannot be verified". Users: drag Rico to Applications, then run once
+  `xattr -dr com.apple.quarantine /Applications/Rico.app` (or right-click -> Open). Nothing else is needed; Rico makes no network requests besides model downloads you start yourself.
+* **Linux**: nothing to sign. Prefer the **`.deb`** (`sudo apt install ./Rico-*.deb`; installs the desktop entry and the Electron sandbox helper correctly). The AppImage needs `chmod +x` and FUSE 2 (`libfuse2`) or `--appimage-extract-and-run`. Checksums for every file are published with each release (`SHA256SUMS.txt`).
 
 ## Verify a signed build
 `Get-AuthenticodeSignature .\Rico-Setup-*.exe` and `Get-AuthenticodeSignature "$env:LOCALAPPDATA\Programs\Rico\resources\bin\win-x64\vulkan\llama-server.exe"` must report `Valid`; with Smart App Control **On** the installer must start without a block.

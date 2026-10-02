@@ -12,7 +12,10 @@ import sys
 
 
 def kaggle(*args: str) -> str:
-    r = subprocess.run(["kaggle", *args], capture_output=True, text=True, timeout=180)
+    try:
+        r = subprocess.run(["kaggle", *args], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
     return r.stdout if r.returncode == 0 else ""
 
 

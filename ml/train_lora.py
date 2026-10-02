@@ -532,47 +532,59 @@ def train(args: argparse.Namespace, tok, train_rows: list[dict], dev_rows: list[
 # --------------------------------------------------------------------------- #
 
 
-def merge_adapter(args: argparse.Namespace, adapter: Path, merged: Path) -> None:
+def merge_adapter(args: argparse.Namespace, adapter: Path, merged: Path, dry_run: bool = False) -> None:
+    """Merge the LoRA into a 16-bit base on CPU and check that the result is what llama.cpp's converter expects.
+    dry_run: do every check but write nothing (used by --dry-run)."""
     import torch
     from peft import PeftModel
-    from transformers import AutoTokenizer
-    log("merging LoRA into the 16-bit base on CPU (needs ~2x model size in RAM) ...")
-    base = load_hf_model(args.base, torch.bfloat16, device_map={"": "cpu"})
+    from transformers import AutoConfig, AutoTokenizer
+    meta = read_adapter_meta(adapter)
+    base_repo = meta.get("base") or args.base
+    if meta.get("base") and meta["base"] != args.base:
+        log(f"[note] adapter was trained on {meta['base']} (rico_meta.json) - merging into THAT base, not {args.base}")
+    loader = meta.get("loader")
+    log(f"merging LoRA into the 16-bit base {base_repo} on CPU (loader={loader or 'auto'}; needs ~2x model size in RAM) ...")
+    base = load_hf_model(base_repo, torch.bfloat16, device_map={"": "cpu"}, loader=loader)
+    if meta.get("base_class") and base.__class__.__name__ != meta["base_class"]:
+        log(f"[warn] base class {base.__class__.__name__} != class used for training {meta['base_class']} "
+            "(module names are verified below)")
     # every adapter module must exist in the freshly loaded base (otherwise merge would silently skip weights)
     base_names = {n for n, _ in base.named_modules()}
+    base_keys = set(base.state_dict().keys())
     wanted = adapter_module_names(adapter)
     missing = [n for n in wanted if n not in base_names]
     if missing:
-        raise RuntimeError(f"{len(missing)}/{len(wanted)} adapter modules are not in the base model {args.base} "
-                           f"(e.g. {missing[:3]}). Train and export with the same --engine/--base "
-                           f"(multimodal checkpoints must be loaded with AutoModelForImageTextToText).")
+        raise RuntimeError(f"{len(missing)}/{len(wanted)} adapter modules are not in the base model {base_repo} "
+                           f"(e.g. {missing[:3]}). The adapter was trained with a different model class "
+                           f"(rico_meta.json loader={loader}, base_class={meta.get('base_class')}).")
     log(f"adapter keys match the base: {len(wanted)} LoRA modules")
     model = PeftModel.from_pretrained(base, str(adapter))
     n_wrapped = sum(1 for m in model.modules() if hasattr(m, "lora_A") and len(getattr(m, "lora_A", {})) > 0)
-    n_saved = 0
-    for fn in ("adapter_model.safetensors", "adapter_model.bin"):
-        f = adapter / fn
-        if f.exists() and fn.endswith(".safetensors"):
-            from safetensors import safe_open
-            with safe_open(str(f), framework="pt") as sf:
-                n_saved = sum(1 for k in sf.keys() if "lora_A" in k)
-            break
-    if n_saved and n_wrapped != n_saved:
-        raise RuntimeError(f"adapter/base mismatch: adapter has {n_saved} LoRA modules but only {n_wrapped} attached "
-                           f"to the base loaded from {args.base}. Train and export with the same --engine/--base.")
+    if wanted and n_wrapped != len(wanted):
+        raise RuntimeError(f"adapter/base mismatch: adapter has {len(wanted)} LoRA modules but only {n_wrapped} attached "
+                           f"to the base loaded from {base_repo}.")
     merged_model = model.merge_and_unload()
-    merged.mkdir(parents=True, exist_ok=True)
-    merged_model.save_pretrained(str(merged), safe_serialization=True, max_shard_size="4GB")
-    AutoTokenizer.from_pretrained(args.base).save_pretrained(str(merged))
-    # the converter picks its code path from config.architectures - it must not change vs. the shipped base
-    import json as _json
-    from transformers import AutoConfig
-    base_archs = list(getattr(AutoConfig.from_pretrained(args.base), "architectures", None) or [])
-    merged_archs = _json.loads((merged / "config.json").read_text(encoding="utf-8")).get("architectures") or []
+    merged_keys = set(merged_model.state_dict().keys())
+    if merged_keys != base_keys:
+        extra, lost = sorted(merged_keys - base_keys)[:3], sorted(base_keys - merged_keys)[:3]
+        raise RuntimeError(f"merged state_dict differs from the base (extra {extra}, missing {lost}): "
+                           "convert_hf_to_gguf would not find the tensors it expects")
+    base_archs = list(getattr(AutoConfig.from_pretrained(base_repo), "architectures", None) or [])
+    merged_archs = list(getattr(merged_model.config, "architectures", None) or [])
     if base_archs and merged_archs != base_archs:
         raise RuntimeError(f"merged config.architectures {merged_archs} != base {base_archs}; "
                            "convert_hf_to_gguf would build a different graph (and the mmproj would not match)")
-    log(f"merged model -> {merged} ({n_wrapped} LoRA modules merged; architectures {merged_archs} unchanged)")
+    if dry_run:
+        log(f"merge dry-run OK ({n_wrapped} LoRA modules merged, {len(merged_keys)} tensors identical to the base, "
+            f"architectures {merged_archs} unchanged); nothing written")
+        return
+    merged.mkdir(parents=True, exist_ok=True)
+    merged_model.save_pretrained(str(merged), safe_serialization=True, max_shard_size="4GB")
+    AutoTokenizer.from_pretrained(base_repo).save_pretrained(str(merged))
+    saved = json.loads((merged / "config.json").read_text(encoding="utf-8")).get("architectures") or []
+    if base_archs and saved != base_archs:
+        raise RuntimeError(f"saved config.architectures {saved} != base {base_archs}")
+    log(f"merged model -> {merged} ({n_wrapped} LoRA modules merged; architectures {saved} unchanged)")
 
 
 def export_gguf(args: argparse.Namespace, merged: Path) -> None:
@@ -582,8 +594,10 @@ def export_gguf(args: argparse.Namespace, merged: Path) -> None:
     binary = ensure_llama_bin(work / "bin")
     exe = ".exe" if os.name == "nt" else ""
     out = Path(args.out)
-    bf16 = out / f"{args.tier}-bf16.gguf"
-    q4 = out / f"{args.tier}-Q4_K_M.gguf"
+    scratch = Path(args.work_dir) if args.work_dir else out      # huge intermediates; only out/release is the product
+    scratch.mkdir(parents=True, exist_ok=True)
+    bf16 = scratch / f"{args.tier}-bf16.gguf"
+    q4 = scratch / f"{args.tier}-Q4_K_M.gguf"
     log("converting HF -> GGUF (bf16) ...")
     subprocess.run([sys.executable, str(src / "convert_hf_to_gguf.py"), str(merged), "--outfile", str(bf16),
                     "--outtype", "bf16"], check=True)
@@ -592,11 +606,16 @@ def export_gguf(args: argparse.Namespace, merged: Path) -> None:
     subprocess.run([str(binary / f"llama-quantize{exe}"), str(bf16), str(q4), "Q4_K_M"], check=True, env=env)
     bf16.unlink(missing_ok=True)
     log("patching metadata + splitting into <=1900 MB shards (ml/package_model.py patch-existing) ...")
-    subprocess.run([sys.executable, str(REPO_ROOT / "ml" / "package_model.py"), "patch-existing", "--tier", args.tier,
-                    "--in", str(q4), "--work", str(out / "work"), "--out-dir", str(out / "release"),
-                    "--llama-bin", str(binary), "--base-model", args.base], check=True)
-    log(f"DONE. Upload {out / 'release'}/*.gguf to the models-v1 release, then merge the catalog patch "
-        f"({out / 'release' / ('catalog-patch-' + args.tier + '.json')}) with `package_model.py merge-catalog`.")
+    cmd = [sys.executable, str(REPO_ROOT / "ml" / "package_model.py"), "patch-existing", "--tier", args.tier,
+           "--in", str(q4), "--work", str(scratch / "work"), "--out-dir", str(out / "release"),
+           "--llama-bin", str(binary), "--base-model", args.base, "--release-tag", args.release_tag]
+    if args.rev:
+        cmd += ["--rev", args.rev]
+    subprocess.run(cmd, check=True)
+    q4.unlink(missing_ok=True)
+    log(f"DONE. Upload {out / 'release'}/*.gguf to the {args.release_tag} release (never overwrite existing assets), "
+        f"then merge the catalog patch ({out / 'release' / ('catalog-patch-' + args.tier + '.json')}) with "
+        "`package_model.py merge-catalog`.")
 
 
 # --------------------------------------------------------------------------- #
@@ -604,13 +623,41 @@ def export_gguf(args: argparse.Namespace, merged: Path) -> None:
 
 def _maybe_import_unsloth(args: argparse.Namespace) -> None:
     """Unsloth must be imported BEFORE transformers/peft so its patches apply."""
-    if args.engine in ("auto", "unsloth") and not args.dry_run:
+    if args.engine in ("auto", "unsloth") and not args.tokenizer_only:
         try:
             import unsloth  # noqa: F401
         except Exception as exc:  # noqa: BLE001
             if args.engine == "unsloth":
                 raise
             log(f"unsloth not importable ({type(exc).__name__}); will use PEFT")
+
+
+def dry_run_model(args: argparse.Namespace, tok, train_rows: list[dict]) -> int:
+    """--dry-run: 2 real optimizer steps on a few rows -> adapter + rico_meta.json -> merge dry-run against a freshly
+    loaded base. Proves (before hours of training) that train, adapter keys, merge and architectures all agree."""
+    import copy
+    import shutil
+    try:
+        import peft  # noqa: F401
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        log(f"torch/transformers/peft not installed ({type(exc).__name__}) - dry run stops after the tokenizer check")
+        return 0
+    dry = copy.copy(args)
+    dry.out = str(Path(args.out) / "dryrun")          # never touches real checkpoints / adapter
+    dry.max_steps, dry.save_steps, dry.logging_steps, dry.no_resume = 2, 10**6, 1, True
+    dry.export = False
+    Path(dry.out).mkdir(parents=True, exist_ok=True)
+    rows = train_rows[: max(8, 2 * dry.batch_size * dry.grad_accum)]
+    log(f"DRY RUN: 2 train steps on {len(rows)} rows, then merge dry-run (out={dry.out})")
+    try:
+        adapter = train(dry, tok, rows, [], None)
+        merge_adapter(dry, adapter, Path(dry.out) / "merged", dry_run=True)
+    finally:
+        shutil.rmtree(dry.out, ignore_errors=True)
+    log("DRY RUN OK: training, adapter, merge and architecture checks all passed")
+    return 0
 
 
 def run(args: argparse.Namespace, callbacks=None) -> int:
@@ -636,12 +683,14 @@ def run(args: argparse.Namespace, callbacks=None) -> int:
         log(f"eot={eot!r} train={st} dev={len(dev_rows)}")
         if not train_rows:
             raise SystemExit("no usable training examples")
-        if args.dry_run:
+        if args.dry_run or args.tokenizer_only:
             ex = train_rows[0]
             sup = [t for t, l in zip(ex["input_ids"], ex["labels"]) if l != -100]
             log("--- prompt (masked) ---\n" + tok.decode([t for t, l in zip(ex["input_ids"], ex["labels"]) if l == -100]))
             log("--- supervised ---\n" + tok.decode(sup))
-            return 0
+            if args.tokenizer_only:
+                return 0
+            return dry_run_model(args, tok, train_rows)
         adapter = train(args, tok, train_rows, dev_rows, callbacks)
     elif not adapter.exists():
         raise SystemExit(f"--skip-train but no adapter at {adapter}")
@@ -650,7 +699,7 @@ def run(args: argparse.Namespace, callbacks=None) -> int:
         log("training stopped early (thermal stop / interrupt) - NOT exporting. Re-run the same command to resume.")
         return 3
     if args.export:
-        merged = Path(args.out) / "merged"
+        merged = Path(args.work_dir or args.out) / "merged"
         merge_adapter(args, adapter, merged)
         export_gguf(args, merged)
         if not args.keep_merged:
