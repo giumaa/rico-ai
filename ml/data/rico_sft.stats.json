@@ -1,15 +1,37 @@
 {
-  "raw_distilled": 0,
-  "kept_distilled": 0,
-  "dropped": {},
-  "qa_chunks": 0,
-  "qa_kept": 0,
-  "qa_dropped": {},
+  "raw_distilled": 900,
+  "kept_prompt_answers": 622,
+  "dropped": {
+    "foreign_dialect": 189,
+    "forbidden_identity": 18,
+    "truncated": 70,
+    "repetition": 1
+  },
+  "qa_chunks": 1247,
+  "qa_kept": 1800,
+  "qa_dropped": {
+    "ungrounded_number": 374,
+    "ungrounded_text": 19,
+    "foreign_dialect": 32,
+    "dup_or_cap": 1351,
+    "no_date_context": 6,
+    "too_short": 4,
+    "forbidden_identity": 3,
+    "wrong_language": 3,
+    "over_max_qa": 1396
+  },
+  "kept_distilled": 2422,
   "gold_unique": 207,
-  "gold_repeat": 3,
-  "total_records": 621,
+  "style_unique": 41,
+  "style_repeat": 3,
+  "identity_unique": 166,
+  "identity_used": 166,
+  "identity_frac": 0.1,
+  "total_records": 2711,
   "sources": {
+    "recent_qa": 1800,
+    "distill": 622,
     "style_examples": 123,
-    "identity": 498
+    "identity": 166
   }
 }
