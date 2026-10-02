@@ -502,12 +502,15 @@ def train(args: argparse.Namespace, tok, train_rows: list[dict], dev_rows: list[
     )
     if dev_rows:
         kw.update(eval_strategy="steps", eval_steps=args.save_steps)
-    try:
-        targs = TrainingArguments(**kw)
-    except TypeError:  # older transformers: evaluation_strategy
-        if "eval_strategy" in kw:
-            kw["evaluation_strategy"] = kw.pop("eval_strategy")
-        targs = TrainingArguments(**kw)
+    # Keep only the kwargs this transformers version accepts (args get renamed/removed between releases).
+    import inspect
+    accepted = set(inspect.signature(TrainingArguments.__init__).parameters)
+    if "eval_strategy" in kw and "eval_strategy" not in accepted and "evaluation_strategy" in accepted:
+        kw["evaluation_strategy"] = kw.pop("eval_strategy")
+    dropped = sorted(k for k in kw if k not in accepted)
+    if dropped:
+        print(f"[train] TrainingArguments: ignoring unsupported args {dropped}", flush=True)
+    targs = TrainingArguments(**{k: v for k, v in kw.items() if k in accepted})
 
     trainer = Trainer(model=model, args=targs, train_dataset=ListDataset(train_rows),
                       eval_dataset=ListDataset(dev_rows) if dev_rows else None,
