@@ -112,6 +112,20 @@ jobs:
           if [ "${{ inputs.action }}" = "fetch" ] && ! grep -qi "complete" status.txt; then
             echo "::error::Kaggle run is not complete yet"; exit 1
           fi
+          if grep -qi "error" status.txt; then
+            mkdir -p kaggle_err && kaggle kernels output "${KAGGLE_OWNER}/${KERNEL_SLUG}" -p kaggle_err >/dev/null 2>&1 || true
+            for f in $(find kaggle_err -name '*.log' -o -name '*.txt' | head -5); do
+              echo "===== $f"; python - "$f" <<'PY'
+          import json, sys
+          raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+          try:  # Kaggle kernel logs are a JSON array of {stream_name, data}
+              raw = "".join(e.get("data", "") for e in json.loads(raw))
+          except Exception:
+              pass
+          print(raw[-6000:])
+          PY
+            done
+          fi
 
       - name: Download Kaggle output
         if: ${{ inputs.action == 'fetch' }}
