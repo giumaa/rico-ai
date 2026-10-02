@@ -28,6 +28,9 @@ on:
       since:
         description: "Only pages whose latest revision is on/after this date (YYYY-MM-DD)"
         default: "2026-04-01"
+      min_articles:
+        description: "collect step fails if fewer articles than this were collected (API throttling guard)"
+        default: "150"
       shards:
         description: "Number of parallel generate jobs (1-20)"
         default: "20"
@@ -86,9 +89,13 @@ jobs:
       - name: Collect recent Libya texts (CC BY / CC BY-SA only)
         env:
           SINCE: ${{ inputs.since }}
+          MIN_ARTICLES: ${{ inputs.min_articles }}
         run: |
           python3 ml/collect_recent.py --since "$SINCE"
-          wc -l ml/data/recent/articles.jsonl; head -n 20 ml/data/recent/ATTRIBUTION.md
+          n=$(wc -l < ml/data/recent/articles.jsonl); echo "collected $n articles"
+          head -n 20 ml/data/recent/ATTRIBUTION.md
+          # fail fast (before 20 x 5 h of generation) when the API throttled us and little text was collected
+          if [ "$n" -lt "${MIN_ARTICLES:-150}" ]; then echo "::error::only $n articles (< ${MIN_ARTICLES:-150}); re-run later"; exit 1; fi
       - uses: actions/upload-artifact@v7
         with:
           name: recent-articles

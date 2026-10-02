@@ -75,7 +75,7 @@ class Api:
     def get(self, **params) -> dict:
         params.update({"format": "json", "formatversion": "2", "maxlag": "5"})
         form = urllib.parse.urlencode(params).encode("utf-8")   # POST: long Arabic title lists overflow GET URLs
-        for attempt in range(6):
+        for attempt in range(8):
             try:
                 req = urllib.request.Request(self.url, data=form, method="POST",
                                              headers={"User-Agent": UA, "Accept-Encoding": "identity"})
@@ -88,6 +88,11 @@ class Api:
                 return data
             except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
                 wait = 3 * (attempt + 1)
+                if isinstance(exc, urllib.error.HTTPError) and exc.code in (429, 503):
+                    try:   # honour the server's Retry-After, otherwise back off hard (rate limited)
+                        wait = max(int(exc.headers.get("Retry-After", "0")), 20 * (attempt + 1))
+                    except ValueError:
+                        wait = 20 * (attempt + 1)
                 log(f"  request failed ({exc}); retry in {wait}s")
                 time.sleep(wait)
         return {}
@@ -232,8 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-libya-density", type=float, default=1.0,
                     help="Libya terms per 1000 chars required for pages that are not in a Libya category / titled with Libya")
     ap.add_argument("--category-depth", type=int, default=1, help="sub-category levels to follow")
-    ap.add_argument("--delay", type=float, default=0.3)
-    ap.add_argument("--workers", type=int, default=3, help="parallel page fetches (be polite)")
+    ap.add_argument("--delay", type=float, default=0.5)
+    ap.add_argument("--workers", type=int, default=2, help="parallel page fetches (be polite)")
     a = ap.parse_args(argv)
 
     since_iso = a.since + "T00:00:00Z"
