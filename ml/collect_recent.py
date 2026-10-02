@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import sys
@@ -147,34 +148,34 @@ def category_titles(api: Api, cat: str, depth: int, budget: int = 60, page_cap: 
     return titles
 
 
-def filter_recent(api: Api, titles: list[str], since: str) -> list[str]:
-    """Cheap pass (revisions only, 50 titles per call): keep titles whose latest revision is >= since."""
-    keep = []
+def page_info(api: Api, titles: list[str], since: str, min_bytes: int) -> list[dict]:
+    """Cheap metadata pass, 50 titles per call: latest revision (id + timestamp), size, canonical URL,
+    disambiguation flag. Keeps pages revised on/after `since`, not disambiguation pages, not tiny stubs."""
+    keep: list[dict] = []
+    seen: set[int] = set()
     for i in range(0, len(titles), 50):
-        d = api.get(action="query", titles="|".join(titles[i:i + 50]), prop="revisions", rvprop="timestamp",
-                    rvslots="main", redirects=1)
+        d = api.get(action="query", titles="|".join(titles[i:i + 50]), prop="info|revisions|pageprops",
+                    rvprop="ids|timestamp", rvslots="main", inprop="url", ppprop="disambiguation", redirects=1)
         for p in (d.get("query") or {}).get("pages") or []:
             revs = p.get("revisions") or []
-            if revs and revs[0]["timestamp"] >= since:
-                keep.append(p["title"])
+            if (p.get("missing") or not revs or p.get("pageprops", {}).get("disambiguation") is not None
+                    or revs[0]["timestamp"] < since or p.get("length", 0) < min_bytes or p["pageid"] in seen):
+                continue
+            seen.add(p["pageid"])
+            keep.append({"pageid": p["pageid"], "title": p["title"], "url": p.get("fullurl"),
+                         "revid": revs[0]["revid"], "timestamp": revs[0]["timestamp"]})
     return keep
 
 
-def fetch_pages(api: Api, titles: list[str], since: str):
-    """Generator: yields page dicts batch by batch (callers can stop early)."""
-    for i in range(0, len(titles), 20):
-        batch = titles[i:i + 20]
-        d = api.get(action="query", titles="|".join(batch), prop="extracts|revisions|info|pageprops", redirects=1,
-                    exlimit="max", explaintext=1, exsectionformat="wiki", rvprop="ids|timestamp", rvslots="main",
-                    inprop="url", ppprop="disambiguation")
-        for p in (d.get("query") or {}).get("pages") or []:
-            if p.get("missing") or p.get("pageprops", {}).get("disambiguation") is not None:
-                continue
-            revs = p.get("revisions") or []
-            if not revs or not p.get("extract"):
-                continue
-            yield {"pageid": p["pageid"], "title": p["title"], "url": p.get("fullurl"),
-                   "revid": revs[0]["revid"], "timestamp": revs[0]["timestamp"], "text": p["extract"]}
+def fetch_extract(api: Api, title: str) -> str:
+    """Plain-text extract of ONE page. (TextExtracts returns the *full* extract for only one page per request
+    when exintro is not set, so batching titles silently drops the rest - hence one request per page.)"""
+    d = api.get(action="query", titles=title, prop="extracts", explaintext=1, exsectionformat="wiki", exlimit=1,
+                redirects=1)
+    for p in (d.get("query") or {}).get("pages") or []:
+        if p.get("extract"):
+            return p["extract"]
+    return ""
 
 
 def clean_text(t: str) -> str:
@@ -223,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since", default="2026-04-01", help="keep pages whose latest revision is on/after this date")
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     ap.add_argument("--sites", default=",".join(SITES))
-    ap.add_argument("--max-pages-per-site", type=int, default=400)
+    ap.add_argument("--max-pages-per-site", type=int, default=600)
     ap.add_argument("--max-titles-per-term", type=int, default=250)
     ap.add_argument("--min-chars", type=int, default=450)
     ap.add_argument("--max-chars", type=int, default=40000, help="truncate very long articles")
@@ -232,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="Libya terms per 1000 chars required for pages that are not in a Libya category / titled with Libya")
     ap.add_argument("--category-depth", type=int, default=1, help="sub-category levels to follow")
     ap.add_argument("--delay", type=float, default=0.3)
+    ap.add_argument("--workers", type=int, default=3, help="parallel page fetches (be polite)")
     a = ap.parse_args(argv)
 
     since_iso = a.since + "T00:00:00Z"
@@ -255,34 +257,48 @@ def main(argv: list[str] | None = None) -> int:
             t = category_titles(api, cat, depth=a.category_depth)
             log(f"  category {cat}: {len(t)} pages")
             cat_titles |= t
-        cat_only = sorted(cat_titles - set(cand))
-        recent_cat = filter_recent(api, cat_only, since_iso)
-        log(f"  {len(cat_only)} category pages checked -> {len(recent_cat)} revised since {a.since}")
         # search hits first (most relevant + newest edits), then category pages
-        titles = sorted(cand, key=cand.get, reverse=True) + [t for t in recent_cat if t not in cand]
-        log(f"  {len(titles)} candidate pages -> fetching text")
+        by_time = sorted(cand, key=cand.get, reverse=True)
+        titled = [t for t in by_time if LIBYA_RE.search(t)]                      # Libya in the title
+        cats = sorted(t for t in cat_titles if t not in cand or not LIBYA_RE.search(t))  # members of Libya categories
+        rest = [t for t in by_time if t not in set(titled)]                      # other search hits (need density check)
+        titles = list(dict.fromkeys(titled + cats + rest))
+        infos = page_info(api, titles, since_iso, a.min_chars)
+        by_title = {i["title"]: i for i in infos}
+        order = {t: n for n, t in enumerate(titles)}
+        infos.sort(key=lambda i: order.get(i["title"], 10 ** 9))
+        log(f"  {len(titles)} candidates -> {len(infos)} revised since {a.since} (non-stub, non-disambiguation); "
+            f"fetching text one page per request ...")
         kept = 0
-        for p in fetch_pages(api, titles, since_iso):
-            if p["timestamp"] < since_iso:
-                continue
-            text = clean_text(p["text"])
-            if len(text) < a.min_chars:
-                continue
-            mentions = len(LIBYA_RE.findall(text))
-            focused = bool(LIBYA_RE.search(p["title"])) or p["title"] in cat_titles
-            density = mentions / max(len(text), 1) * 1000
-            if mentions < a.min_libya_mentions or (not focused and density < a.min_libya_density):
-                continue   # off-topic page that merely mentions Libya
-            base = cfg["base"]
-            articles.append({
-                "id": f"{key}:{p['pageid']}", "site": key, "project": cfg["project"], "lang": cfg["lang"],
-                "title": p["title"], "url": p["url"] or f"{base}/wiki/{urllib.parse.quote(p['title'].replace(' ', '_'))}",
-                "permalink": f"{base}/w/index.php?title={urllib.parse.quote(p['title'].replace(' ', '_'))}&oldid={p['revid']}",
-                "revid": p["revid"], "timestamp": p["timestamp"], "license": lic, "text": text[:a.max_chars],
-            })
-            kept += 1
+        base = cfg["base"]
+        pool = ThreadPoolExecutor(max_workers=a.workers)
+        for start in range(0, len(infos), 3 * a.workers):
+            batch = infos[start:start + 3 * a.workers]
+            for info, raw in zip(batch, pool.map(lambda i: fetch_extract(api, i["title"]), batch)):
+                text = clean_text(raw)
+                if len(text) < a.min_chars:
+                    continue
+                mentions = len(LIBYA_RE.findall(text))
+                focused = bool(LIBYA_RE.search(info["title"])) or info["title"] in cat_titles
+                density = mentions / max(len(text), 1) * 1000
+                if mentions < a.min_libya_mentions or (not focused and density < a.min_libya_density):
+                    continue   # off-topic page that merely mentions Libya
+                q = urllib.parse.quote(info["title"].replace(" ", "_"))
+                articles.append({
+                    "id": f"{key}:{info['pageid']}", "site": key, "project": cfg["project"], "lang": cfg["lang"],
+                    "title": info["title"], "url": info["url"] or f"{base}/wiki/{q}",
+                    "permalink": f"{base}/w/index.php?title={q}&oldid={info['revid']}",
+                    "revid": info["revid"], "timestamp": info["timestamp"], "license": lic,
+                    "text": text[:a.max_chars],
+                })
+                kept += 1
+                if kept >= a.max_pages_per_site:
+                    break
             if kept >= a.max_pages_per_site:
                 break
+            if (start // (3 * a.workers)) % 10 == 0:
+                log(f"    ... {start + len(batch)}/{len(infos)} fetched, {kept} kept")
+        pool.shutdown(wait=False)
         log(f"  kept {kept} pages for {cfg['project']}")
 
     if not articles:

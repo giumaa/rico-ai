@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -44,11 +45,13 @@ from rico_common import (  # noqa: E402
 )
 
 DEFAULT_REPO = "giumaa/rico-ai"
-RELEASE_TAG = "models-v1"
+RELEASE_TAG = "models-v2"          # models-v1 is FROZEN (shipped catalog + app builds reference its assets by sha256)
 SPLIT_MAX = "1900M"                 # llama-gguf-split: M = 1,000,000 bytes -> 1.9e9 < 2 GiB (GitHub asset limit)
 MAX_SHARD_BYTES = 2_000_000_000
 GENERAL_NAMES = {"rico-lite": "Rico Lite", "rico": "Rico", "rico-max": "Rico Max"}
 RICO_MARK = "{#- rico:default-persona -#}"
+IDENTITY_LINE = "ريكو من تطوير جمعة أبوراس"   # the ONLY text baked into the chat template of new packs
+PATCH_VERSION = "3"   # bump when the metadata/template patch logic changes (changes asset names)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +100,14 @@ def jinja_string_literal(text: str) -> str:
         else:
             out.append(ch)
     return '"' + "".join(out) + '"'
+
+
+def template_persona(path: str | None = None) -> str:
+    """Default system text embedded in the chat template of NEW packs.
+
+    Only a short, stable identity line: the app injects the full (and evolving) persona itself, so the weights/template
+    never go stale when the persona is edited. `--persona <file>` still embeds a full persona (old behaviour)."""
+    return load_persona(path) if path else IDENTITY_LINE
 
 
 def patch_chat_template(original: str, persona: str) -> str:
@@ -302,7 +313,7 @@ def check_template_text(template: str, persona: str) -> None:
 
 
 def cmd_check_template(a: argparse.Namespace) -> None:
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     if a.template_file:
         tmpl = Path(a.template_file).read_text(encoding="utf-8")
         if RICO_MARK not in tmpl:
@@ -322,7 +333,7 @@ def cmd_check_template(a: argparse.Namespace) -> None:
 
 
 def cmd_server_check(a: argparse.Namespace) -> None:
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     probe = persona.strip().splitlines()[0][:30]
     exe = Path(a.llama_bin) / ("llama-server.exe" if os.name == "nt" else "llama-server")
     port = a.port
@@ -390,7 +401,7 @@ def fetch_mmproj(model: dict, out_dir: Path, tier: str) -> dict | None:
     src = (model.get("source") or {}).get("mmproj")
     if not src:
         return None
-    dst = out_dir / f"{tier}-mmproj-F16.gguf"
+    dst = out_dir / f"{tier}-mmproj-{src['sha256'][:8]}-F16.gguf"   # name carries the content hash
     download(src["url"], dst, src["sha256"], src["sizeBytes"])
     return {"name": dst.name, "sizeBytes": dst.stat().st_size, "sha256": src["sha256"], "source": src}
 
@@ -442,7 +453,7 @@ def cmd_selftest(a: argparse.Namespace) -> None:
 
     tmpl = ("{%- for m in messages %}{{ '<|im_start|>' + m['role'] + '\n' + m['content'] + '<|im_end|>\n' }}"
             "{%- endfor %}{%- if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{%- endif %}")
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         src, dst = Path(td) / "src.gguf", Path(td) / "dst.gguf"
         w = gguf.GGUFWriter(str(src), arch="llama")
@@ -479,7 +490,7 @@ def cmd_download(a: argparse.Namespace) -> None:
 
 
 def cmd_patch(a: argparse.Namespace) -> None:
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     rep = patch_gguf(Path(a.inp), Path(a.out), name=a.name, description=a.description or a.name, persona=persona)
     log(f"patched -> {a.out}: {rep}")
 
@@ -500,11 +511,11 @@ def cmd_describe(a: argparse.Namespace) -> None:
     log(f"wrote {a.out}")
 
 
-def _run_common(a: argparse.Namespace, patched: Path, tier: str, model: dict, base_model: str,
+def _run_common(a: argparse.Namespace, patched: Path, tier: str, rev: str, model: dict, base_model: str,
                 source: dict | None, extra: dict | None) -> None:
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     out_dir = Path(a.out_dir)
-    prefix = f"{tier}-Q4_K_M"
+    prefix = f"{tier}-{rev}-Q4_K_M"
     shards = split_gguf(patched, out_dir, prefix, Path(a.llama_bin), a.max_size)
     if not a.keep_work:
         patched.unlink(missing_ok=True)
@@ -529,7 +540,7 @@ def cmd_run(a: argparse.Namespace) -> None:
     work.mkdir(parents=True, exist_ok=True)
     base_file = work / src["file"]
     download(src["url"], base_file, src["sha256"], src["sizeBytes"])
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     patched = work / f"{a.tier}-patched.gguf"
     log("patching metadata ...")
     rep = patch_gguf(base_file, patched, name=GENERAL_NAMES.get(a.tier, a.tier),
@@ -537,14 +548,17 @@ def cmd_run(a: argparse.Namespace) -> None:
                      license_id=model.get("license"), base_model=model["baseModel"])
     log(f"patched: {rep}")
     base_file.unlink(missing_ok=True)  # free disk before splitting (runner has limited space)
-    _run_common(a, patched, a.tier, model, model["baseModel"], src, None)
+    # asset names embed a revision (base file sha + persona + patch version): identical inputs -> identical bytes ->
+    # identical names, so re-uploading is harmless; any change produces NEW names (never overwrite shipped assets)
+    rev = hashlib.sha256(f"{src['sha256']}|{persona}|{PATCH_VERSION}".encode("utf-8")).hexdigest()[:8]
+    _run_common(a, patched, a.tier, rev, model, model["baseModel"], src, None)
 
 
 def cmd_patch_existing(a: argparse.Namespace) -> None:
     """Patch + split + describe a locally produced GGUF (e.g. the fine-tuned model)."""
     cat = load_catalog(a.catalog)
     model = get_model(cat, a.tier)
-    persona = load_persona(a.persona)
+    persona = template_persona(a.persona)
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
     patched = work / f"{a.tier}-patched.gguf"
@@ -553,7 +567,8 @@ def cmd_patch_existing(a: argparse.Namespace) -> None:
                      description=tier_description(a.tier, base_model) + " Fine-tuned on the Rico SFT dataset.",
                      persona=persona, license_id=model.get("license"), base_model=base_model)
     log(f"patched: {rep}")
-    _run_common(a, patched, a.tier, model, base_model, model.get("source"), {"finetuned": True})
+    rev = a.rev or "ft" + sha256_file(Path(a.inp))[:8]   # explicit label (ft1, ft2 ...) or hash of the quantised GGUF
+    _run_common(a, patched, a.tier, rev, model, base_model, model.get("source"), {"finetuned": True})
 
 
 def cmd_merge_catalog(a: argparse.Namespace) -> None:
@@ -599,7 +614,7 @@ def cmd_merge_catalog(a: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--catalog", default=str(CATALOG_PATH))
-    ap.add_argument("--persona", default=None, help=f"default: {SYSTEM_PROMPT_PATH.relative_to(REPO_ROOT)}")
+    ap.add_argument("--persona", default=None, help="embed this file as the default system prompt (default: only the short identity line)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, **kw):
@@ -650,6 +665,8 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "patch-existing":
             p.add_argument("--in", dest="inp", required=True, help="fine-tuned Q4_K_M GGUF")
             p.add_argument("--base-model", default=None)
+            p.add_argument("--rev", default=None, help="revision label in the asset names, e.g. ft1 -> rico-lite-ft1-Q4_K_M-... "
+                           "(default: ft<sha8 of the GGUF>). Release assets are never overwritten: bump it for every new fine-tune")
 
     p = add("merge-catalog", cmd_merge_catalog)
     p.add_argument("--patch-dir", required=True)

@@ -438,6 +438,10 @@ def cmd_merge(a: argparse.Namespace) -> None:
         qa_kept = qa_kept[:a.max_qa]
     log(f"recent Q&A: {len(qa_recs)} chunks -> {len(qa_kept)} pairs kept; dropped: {dict(qa_reasons)}")
     kept.extend(qa_kept)
+    if len(kept) < a.min_distilled:   # never overwrite a good dataset with a gold-only one
+        raise SystemExit(f"merge guard: only {len(kept)} teacher-generated records survived the filters "
+                         f"(< --min-distilled {a.min_distilled}; {len(raw)} raw prompt answers, {len(qa_recs)} Q&A chunks "
+                         f"from {len(files)} shard file(s)). Nothing written. Check the generate jobs (llama-server logs).")
 
     gold = load_gold(Path(a.seed_dir))
     # report (do not drop) gold records that would fail the filters - helps Agent C spot mistakes
@@ -445,21 +449,51 @@ def cmd_merge(a: argparse.Namespace) -> None:
         why = rules.check(g["messages"][0]["content"], g["messages"][-1]["content"])
         if why in ("foreign_dialect", "leftover_tokens", "broken_markdown", "cjk_leak"):
             log(f"[warn] gold example {g['id']} ({g['source']}) would fail filter: {why}")
+    # ---- mix: style gold x style_repeat; identity x identity_repeat, capped at ~identity_frac of the FINAL dataset ----
+    # (identity examples are 160+ near-duplicates of "who are you / who made you": unchecked they dominate the SFT mix
+    # and make the model answer every question with its identity)
+    style = [g for g in gold if g["source"] != "identity"]
+    ident = [g for g in gold if g["source"] == "identity"]
+    base_n = len(kept) + a.style_repeat * len(style)
+    frac = min(max(a.identity_frac, 0.0), 0.5)
+    ident_cap = max(1, int(round(frac / (1 - frac) * base_n))) if ident else 0
+    ident_pool = [dict(g) for g in ident for _ in range(max(1, a.identity_repeat))]
+    random.Random(a.seed + 1).shuffle(ident_pool)
+    ident_used = ident_pool[:ident_cap]
+    log(f"mix: {len(kept)} teacher records + style x{a.style_repeat} ({len(style)} unique) + identity "
+        f"{len(ident_used)}/{len(ident_pool)} (cap {frac:.0%} of final = {ident_cap})")
     final = list(kept)
-    for g in gold:
-        final.extend(dict(g) for _ in range(max(1, a.gold_repeat)))
+    for g in style:
+        final.extend(dict(g) for _ in range(max(1, a.style_repeat)))
+    final.extend(ident_used)
     random.Random(a.seed).shuffle(final)
     n = write_jsonl(a.out, final)
     stats = {
-        "raw_distilled": len(raw), "kept_distilled": len(kept) - len(qa_kept), "dropped": dict(reasons),
+        "raw_distilled": len(raw), "kept_prompt_answers": len(kept) - len(qa_kept), "dropped": dict(reasons),
         "qa_chunks": len(qa_recs), "qa_kept": len(qa_kept), "qa_dropped": dict(qa_reasons),
-        "gold_unique": len(gold), "gold_repeat": a.gold_repeat, "total_records": n,
+        "kept_distilled": len(kept),   # all teacher-generated records kept (prompt answers + recent Q&A)
+        "gold_unique": len(gold), "style_unique": len(style), "style_repeat": a.style_repeat,
+        "identity_unique": len(ident), "identity_used": len(ident_used), "identity_frac": a.identity_frac,
+        "total_records": n,
         "sources": dict(Counter(r["source"] for r in final)),
     }
     stats_path = Path(a.stats_out) if a.stats_out else Path(a.out).with_suffix(".stats.json")
     stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     log(f"wrote {n} records -> {a.out}; stats -> {stats_path}")
-    if not kept and not gold:
+    if qa_kept:   # CC BY-SA attribution notice travels with the dataset
+        notice = Path(a.out).with_suffix(".NOTICE.md")
+        notice.write_text(
+            "# Notice - third-party content in rico_sft.jsonl\n\n"
+            f"{len(qa_kept)} records (`\"source\": \"recent_qa\"`) are machine-written question/answer pairs derived from "
+            "Wikipedia / Wikinews article text (CC BY-SA 4.0, https://creativecommons.org/licenses/by-sa/4.0/). "
+            "They are adaptations: attribution (page titles, permalinks, revision dates, history links for authorship) is in "
+            "`ml/data/recent/ATTRIBUTION.md`; keep it with the data and share derived data under CC BY-SA 4.0. Each such "
+            "record also carries `url`, `license` and `article_date`. The remaining records (distilled answers, identity, "
+            "style examples) are original project content.\n\n"
+            "These pairs are summaries by a small language model: they can be wrong or outdated and are not verified news.\n",
+            encoding="utf-8", newline="\n")
+        log(f"wrote {notice}")
+    if not final:
         raise SystemExit("no data produced - check shard artifacts and seed files")
 
 
@@ -550,11 +584,18 @@ def cmd_selftest(a: argparse.Namespace) -> None:
             cmd_generate(ns)
             cmd_generate(ns)  # second call must resume and do nothing
         ns = argparse.Namespace(shards_dir=str(td_p / "shards"), out=str(td_p / "sft.jsonl"), seed_dir=str(seed),
-                                rules=None, gold_repeat=3, near_dup=0.8, seed=1, stats_out=None, max_per_prompt=2, max_qa=100, max_qa_per_article=12)
+                                rules=None, style_repeat=3, identity_repeat=1, identity_frac=0.10, min_distilled=1, near_dup=0.8, seed=1, stats_out=None, max_per_prompt=2, max_qa=100, max_qa_per_article=12)
         cmd_merge(ns)
         recs = list(iter_jsonl(td_p / "sft.jsonl"))
         stats = json.loads((td_p / "sft.stats.json").read_text(encoding="utf-8"))
-        assert stats["sources"].get("identity") == 3 and stats["sources"].get("style_examples") == 3, stats
+        assert stats["sources"].get("identity") == 1 and stats["sources"].get("style_examples") == 3, stats
+        assert stats["kept_distilled"] >= 2, stats
+        ns_bad = argparse.Namespace(**dict(vars(ns), min_distilled=10**6, out=str(td_p / "bad.jsonl")))
+        try:
+            cmd_merge(ns_bad)
+            raise AssertionError("merge guard did not trigger")
+        except SystemExit as exc:
+            assert "merge guard" in str(exc) and not (td_p / "bad.jsonl").exists(), exc
         assert stats["dropped"].get("foreign_dialect") and stats["dropped"].get("forbidden_identity") \
             and stats["dropped"].get("broken_markdown"), stats
         assert all(r["messages"][-1]["role"] == "assistant" for r in recs)
@@ -610,7 +651,11 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--out", default=str(SFT_PATH))
     m.add_argument("--seed-dir", default=str(SEED_DIR))
     m.add_argument("--rules", default=None, help="default: eval/score_rules.json (+ built-in rules)")
-    m.add_argument("--gold-repeat", type=int, default=3)
+    m.add_argument("--style-repeat", type=int, default=3, help="style_examples (gold) are repeated this many times")
+    m.add_argument("--identity-repeat", type=int, default=1, help="identity examples: repeat (default x1)")
+    m.add_argument("--identity-frac", type=float, default=0.10, help="identity examples are capped at ~this share of the final dataset")
+    m.add_argument("--min-distilled", type=int, default=1000,
+                   help="fail (write nothing) if fewer teacher-generated records (prompt answers + recent Q&A) survive")
     m.add_argument("--max-qa", type=int, default=1800, help="cap on recent_qa pairs (0 = no cap)")
     m.add_argument("--max-qa-per-article", type=int, default=12)
     m.add_argument("--max-per-prompt", type=int, default=2, help="keep at most this many answers per prompt")

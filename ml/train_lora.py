@@ -15,7 +15,10 @@ What it does
      quantizes to Q4_K_M and runs ml/package_model.py patch-existing (Rico metadata + persona template + shards +
      catalog patch).
 
-Heavy imports (torch / transformers / peft) are lazy so `--dry-run` works on a machine without a GPU stack.
+--dry-run  = tokenizer/masking check + 2 real train steps + a merge dry-run (adapter keys vs. a freshly loaded base,
+             architectures unchanged, nothing exported). `--tokenizer-only` = just the data/masking check (no model).
+The adapter dir gets `rico_meta.json` (base repo + HF loader class used for training); the merge re-uses exactly those.
+Heavy imports (torch / transformers / peft) are lazy so `--tokenizer-only` works on a machine without a GPU stack.
 `main(argv, callbacks=[...])` lets ml/safe_runner.py plug in its thermal / duty-cycle callback.
 """
 from __future__ import annotations
@@ -108,12 +111,23 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--engine", choices=("auto", "unsloth", "peft"), default="auto")
     ap.add_argument("--no-resume", action="store_true", help="ignore existing checkpoints")
     ap.add_argument("--num-threads", type=int, default=0, help="torch CPU threads (0 = leave default)")
-    ap.add_argument("--dry-run", action="store_true", help="only build + inspect the dataset (no model load)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="data check + 2 train steps + merge dry-run (no export, nothing kept). Falls back to "
+                         "--tokenizer-only when torch/transformers/peft are not installed")
+    ap.add_argument("--tokenizer-only", action="store_true", help="only build + inspect the dataset (no model load)")
     ap.add_argument("--skip-train", action="store_true", help="skip training (use with --export on an existing adapter)")
     ap.add_argument("--export", action="store_true", help="merge -> GGUF -> Q4_K_M -> Rico metadata + shards")
     ap.add_argument("--tier", default=None, help="catalog tier for --export (default: preset tier)")
     ap.add_argument("--llama-work", default=str(REPO_ROOT / "ml" / "work" / "llama.cpp"))
     ap.add_argument("--keep-merged", action="store_true")
+    ap.add_argument("--work-dir", default=None,
+                    help="scratch dir for the HUGE intermediates (merged 16-bit model, bf16 + Q4_K_M GGUF, packaging work). "
+                         "Default: --out. On Kaggle use /tmp so that only release/ lands in /kaggle/working")
+    ap.add_argument("--release-tag", default="models-v2",
+                    help="release the shards will be uploaded to (goes into the catalog patch URLs; models-v1 is frozen)")
+    ap.add_argument("--rev", default=None,
+                    help="revision label in the shard names, e.g. ft1 -> rico-lite-ft1-Q4_K_M-... (default ft<sha8>); "
+                         "assets are never overwritten, so bump it for every new fine-tune")
     ap.add_argument("--vram-fraction", type=float, default=0.0,
                     help="cap this process' GPU memory (0 = no cap); safe_runner sets 0.92")
     return ap
@@ -265,23 +279,102 @@ def compute_dtype():
     return torch.float16
 
 
-def load_hf_model(repo: str, dtype, quant_cfg=None, device_map=None):
+def is_multimodal(repo: str) -> bool:
+    """True for vision-language checkpoints (Qwen3.5, Gemma 4 ...): config has a vision tower."""
+    try:
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(repo)
+        archs = " ".join(getattr(cfg, "architectures", None) or [])
+        return hasattr(cfg, "vision_config") or "ConditionalGeneration" in archs
+    except Exception:  # noqa: BLE001
+        return False
+
+
+LOADERS = ("AutoModelForImageTextToText", "AutoModelForCausalLM")
+
+
+def infer_loader(model) -> str:
+    """HF Auto class that corresponds to an already loaded (possibly PEFT/Unsloth-wrapped) model."""
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    name = base.__class__.__name__
+    cfg = getattr(base, "config", None)
+    if "ConditionalGeneration" in name or hasattr(cfg, "vision_config"):
+        return "AutoModelForImageTextToText"
+    return "AutoModelForCausalLM"
+
+
+def load_hf_model(repo: str, dtype, quant_cfg=None, device_map=None, loader: str | None = None):
+    """Load with the class that matches the checkpoint: multimodal checkpoints go through
+    AutoModelForImageTextToText FIRST (keeps the original architecture + module names, so LoRA keys, the merged
+    config and the llama.cpp converter all agree); plain LMs use AutoModelForCausalLM.
+    `loader` (from adapter/rico_meta.json) pins the exact class used during training - no guessing, no fallback."""
     import transformers
+    if loader:
+        order = (loader,)
+    else:
+        order = LOADERS if is_multimodal(repo) else LOADERS[::-1]
     errors = []
-    for cls_name in ("AutoModelForCausalLM", "AutoModelForImageTextToText"):
+    for cls_name in order:
         cls = getattr(transformers, cls_name, None)
         if cls is None:
+            errors.append(f"{cls_name}: not available in transformers {transformers.__version__}")
             continue
         try:
-            kw = dict(_dtype_kw(dtype))
+            kw: dict[str, Any] = dict(**_dtype_kw(dtype), trust_remote_code=False)
             if quant_cfg is not None:
                 kw["quantization_config"] = quant_cfg
             if device_map is not None:
                 kw["device_map"] = device_map
-            return cls.from_pretrained(repo, **kw)
+            model = cls.from_pretrained(repo, **kw)
+            model._rico_loader = cls_name
+            log(f"loaded {repo} with {cls_name} ({model.__class__.__name__})")
+            return model
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{cls_name}: {exc}")
-    raise RuntimeError("could not load " + repo + ":\n  " + "\n  ".join(errors))
+    raise RuntimeError("could not load " + repo + ":
+  " + "
+  ".join(errors))
+
+
+META_NAME = "rico_meta.json"
+
+
+def write_adapter_meta(adapter: Path, args: argparse.Namespace, model, engine: str) -> dict:
+    """adapter/rico_meta.json: what the merge needs to rebuild EXACTLY the model the adapter was trained on."""
+    import peft
+    import transformers
+    base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+    meta = {
+        "base": args.base, "train_base": args.train_base, "preset": args.preset, "engine": engine,
+        "loader": getattr(base_model, "_rico_loader", None) or infer_loader(model),
+        "base_class": base_model.__class__.__name__,
+        "architectures": list(getattr(getattr(base_model, "config", None), "architectures", None) or []),
+        "lora_modules": len(adapter_module_names(adapter)), "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
+        "transformers": transformers.__version__, "peft": peft.__version__,
+    }
+    (adapter / META_NAME).write_text(json.dumps(meta, indent=2) + "
+", encoding="utf-8")
+    log(f"wrote {adapter / META_NAME}: loader={meta['loader']} base_class={meta['base_class']} base={meta['base']}")
+    return meta
+
+
+def read_adapter_meta(adapter: Path) -> dict:
+    f = adapter / META_NAME
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+def adapter_module_names(adapter: Path) -> list[str]:
+    """Module names an adapter was trained on (from its safetensors keys)."""
+    f = adapter / "adapter_model.safetensors"
+    if not f.exists():
+        return []
+    from safetensors import safe_open
+    names = set()
+    with safe_open(str(f), framework="pt") as sf:
+        for k in sf.keys():
+            if ".lora_A" in k:
+                names.add(k.split(".lora_A")[0].removeprefix("base_model.model."))
+    return sorted(names)
 
 
 def find_lora_targets(model) -> list[str]:
@@ -432,6 +525,7 @@ def train(args: argparse.Namespace, tok, train_rows: list[dict], dev_rows: list[
     adapter = out / "adapter"
     trainer.model.save_pretrained(str(adapter))
     tok.save_pretrained(str(adapter))
+    write_adapter_meta(adapter, args, trainer.model, engine)
     log(f"adapter saved -> {adapter}")
     return adapter
 
@@ -447,6 +541,15 @@ def merge_adapter(args: argparse.Namespace, adapter: Path, merged: Path) -> None
     from transformers import AutoTokenizer
     log("merging LoRA into the 16-bit base on CPU (needs ~2x model size in RAM) ...")
     base = load_hf_model(args.base, torch.bfloat16, device_map={"": "cpu"})
+    # every adapter module must exist in the freshly loaded base (otherwise merge would silently skip weights)
+    base_names = {n for n, _ in base.named_modules()}
+    wanted = adapter_module_names(adapter)
+    missing = [n for n in wanted if n not in base_names]
+    if missing:
+        raise RuntimeError(f"{len(missing)}/{len(wanted)} adapter modules are not in the base model {args.base} "
+                           f"(e.g. {missing[:3]}). Train and export with the same --engine/--base "
+                           f"(multimodal checkpoints must be loaded with AutoModelForImageTextToText).")
+    log(f"adapter keys match the base: {len(wanted)} LoRA modules")
     model = PeftModel.from_pretrained(base, str(adapter))
     n_wrapped = sum(1 for m in model.modules() if hasattr(m, "lora_A") and len(getattr(m, "lora_A", {})) > 0)
     n_saved = 0
@@ -464,7 +567,15 @@ def merge_adapter(args: argparse.Namespace, adapter: Path, merged: Path) -> None
     merged.mkdir(parents=True, exist_ok=True)
     merged_model.save_pretrained(str(merged), safe_serialization=True, max_shard_size="4GB")
     AutoTokenizer.from_pretrained(args.base).save_pretrained(str(merged))
-    log(f"merged model -> {merged} ({n_wrapped} LoRA modules merged)")
+    # the converter picks its code path from config.architectures - it must not change vs. the shipped base
+    import json as _json
+    from transformers import AutoConfig
+    base_archs = list(getattr(AutoConfig.from_pretrained(args.base), "architectures", None) or [])
+    merged_archs = _json.loads((merged / "config.json").read_text(encoding="utf-8")).get("architectures") or []
+    if base_archs and merged_archs != base_archs:
+        raise RuntimeError(f"merged config.architectures {merged_archs} != base {base_archs}; "
+                           "convert_hf_to_gguf would build a different graph (and the mmproj would not match)")
+    log(f"merged model -> {merged} ({n_wrapped} LoRA modules merged; architectures {merged_archs} unchanged)")
 
 
 def export_gguf(args: argparse.Namespace, merged: Path) -> None:

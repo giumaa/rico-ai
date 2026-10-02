@@ -10,7 +10,9 @@ name: Distill
 #            (b) reads article chunks and writes 3-5 grounded Libyan-dialect Q&A pairs (with date context).
 #            Partial results are uploaded as artifacts after every chunk, so a crash / timeout never loses everything.
 #  merge   : filters (eval/score_rules.json + built-in heuristics + grounding checks), de-duplicates, adds the gold
-#            seeds (identity + style, x3) -> ml/data/rico_sft.jsonl (+ stats) -> artifact + commit.
+#            seeds (style x3, identity x1 capped at ~10 % of the dataset) -> ml/data/rico_sft.jsonl (+ stats) -> artifact +
+#            commit.  Guards: merge fails below --min-distilled (default 1000), a commit needs kept_distilled > 0,
+#            every generate job fails if its shard is empty.  merge_only_run_id re-merges an earlier run's shards.
 #
 # Teacher: Gemma-4-12B-it Q4_K_M (Apache-2.0 + Gemma Prohibited Use Policy; outputs may be used to train other
 # models - see docs/ml.md "Licenses").  ~7.4 GB model on a 16 GB / 4 vCPU runner, 3 chunks per job.
@@ -62,18 +64,21 @@ on:
         type: boolean
         default: true
       llama_cpp_tag:
-        description: "llama.cpp release"
-        default: "b11312"
+        description: "llama.cpp release (empty = the tag in the repo-root LLAMA_CPP_TAG file, fallback b11312)"
+        default: ""
+      min_distilled:
+        description: "Merge guard: fail (and write/commit nothing) if fewer teacher-generated records survive the filters"
+        default: "1000"
+      merge_only_run_id:
+        description: "Re-merge the shard artifacts of a previous Distill run (run id) WITHOUT generating anything. Empty = normal run"
+        default: ""
 
 permissions:
-  contents: write
-
-env:
-  LLAMA_CPP_TAG: ${{ inputs.llama_cpp_tag || 'b11312' }}
+  contents: read
 
 jobs:
   collect:
-    if: ${{ inputs.collect }}
+    if: ${{ inputs.collect && inputs.merge_only_run_id == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -95,6 +100,7 @@ jobs:
   teacher-cache:
     # Download the teacher ONCE (HF) and cache it; the 20 generate jobs restore it from the Actions cache instead of
     # hitting Hugging Face concurrently. (Repo cache quota is 10 GB; the 7.4 GB teacher fits.)
+    if: ${{ inputs.merge_only_run_id == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -115,6 +121,7 @@ jobs:
           if [ -n "$TEACHER_SHA" ]; then echo "$TEACHER_SHA  teacher-cache/teacher.gguf" | sha256sum -c -; fi
 
   prepare:
+    if: ${{ inputs.merge_only_run_id == '' }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
@@ -165,7 +172,12 @@ jobs:
           echo "NUM_SHARDS=$n" >> "$GITHUB_ENV"
           ls -la ml/data/recent 2>/dev/null || true
 
-      - name: Fetch llama.cpp ${{ env.LLAMA_CPP_TAG }} (linux x64, CPU)
+      - name: Resolve llama.cpp tag (input > LLAMA_CPP_TAG file > b11312)
+        env:
+          TAG_OVERRIDE: ${{ inputs.llama_cpp_tag }}
+        run: echo "LLAMA_CPP_TAG=$(bash .github/scripts/llama_tag.sh "$TAG_OVERRIDE" b11312)" | tee -a "$GITHUB_ENV"
+
+      - name: Fetch llama.cpp (linux x64, CPU)
         run: |
           mkdir -p "$RUNNER_TEMP/llama"
           curl -fsSL --retry 5 -o "$RUNNER_TEMP/llama.tgz" \
@@ -236,6 +248,14 @@ jobs:
           overwrite: true
           if-no-files-found: warn
 
+      - name: Assert this shard produced output
+        # every generate job must deliver data: a silent "0 records" shard was the failure mode of the first test runs
+        run: |
+          f="work/shard-${SHARD}.jsonl"
+          n=$( [ -f "$f" ] && grep -c . "$f" || echo 0 )
+          echo "shard ${SHARD}: ${n} records in ${f}"
+          if [ "$n" -le 0 ]; then echo "::error::shard ${SHARD} produced an empty output (teacher server never answered?)"; exit 1; fi
+
       - name: Server + memory logs (tail)
         if: always()
         run: |
@@ -257,24 +277,48 @@ jobs:
     needs: generate
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # commit the dataset
+      actions: read      # download artifacts of another run (merge_only_run_id)
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
       - name: Get fresh recent articles + attribution
-        if: ${{ inputs.collect }}
+        if: ${{ inputs.collect && inputs.merge_only_run_id == '' }}
         uses: actions/download-artifact@v8
         with:
           name: recent-articles
           path: ml/data/recent
-      - uses: actions/download-artifact@v8
+      - name: Get recent articles + attribution of run ${{ inputs.merge_only_run_id }}
+        if: ${{ inputs.merge_only_run_id != '' }}
+        continue-on-error: true      # that run may have used the repo copy (collect=false)
+        uses: actions/download-artifact@v8
+        with:
+          name: recent-articles
+          path: ml/data/recent
+          run-id: ${{ inputs.merge_only_run_id }}
+          github-token: ${{ github.token }}
+      - name: Get shard artifacts (this run)
+        if: ${{ inputs.merge_only_run_id == '' }}
+        uses: actions/download-artifact@v8
         with:
           pattern: distill-shard-*
           path: shards
-      - name: Merge, filter, dedup, add gold seeds (x3)
+      - name: Get shard artifacts of run ${{ inputs.merge_only_run_id }}
+        if: ${{ inputs.merge_only_run_id != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: distill-shard-*
+          path: shards
+          run-id: ${{ inputs.merge_only_run_id }}
+          github-token: ${{ github.token }}
+      - name: Merge, filter, dedup, mix (style x3, identity <= 10 %); fails below --min-distilled
+        env:
+          MIN_DISTILLED: ${{ inputs.min_distilled }}
         run: |
           find shards -name '*.jsonl' | head -n 50
-          python3 ml/distill.py merge --shards-dir shards --out ml/data/rico_sft.jsonl --gold-repeat 3
+          python3 ml/distill.py merge --min-distilled "${MIN_DISTILLED:-1000}" --shards-dir shards --out ml/data/rico_sft.jsonl --style-repeat 3 --identity-repeat 1 --identity-frac 0.10
           cat ml/data/rico_sft.stats.json
       - uses: actions/upload-artifact@v7
         with:
@@ -282,13 +326,17 @@ jobs:
           path: |
             ml/data/rico_sft.jsonl
             ml/data/rico_sft.stats.json
+            ml/data/rico_sft.NOTICE.md
             ml/data/recent/ATTRIBUTION.md
       - name: Commit dataset (+ recent articles & attribution)
         if: ${{ inputs.commit_result }}
         run: |
+          kept=$(python3 -c "import json; print(json.load(open('ml/data/rico_sft.stats.json'))['kept_distilled'])")
+          if [ "$kept" -le 0 ]; then echo "::warning::kept_distilled=$kept - gold-only dataset, NOT committing"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ml/data/rico_sft.jsonl ml/data/rico_sft.stats.json
+          [ -f ml/data/rico_sft.NOTICE.md ] && git add ml/data/rico_sft.NOTICE.md
           if [ -d ml/data/recent ]; then git add ml/data/recent; fi
           if git diff --cached --quiet; then echo "dataset unchanged"; exit 0; fi
           git commit -m "data: refresh rico_sft.jsonl (self-distillation + recent Libya Q&A) [skip ci]"

@@ -2,41 +2,135 @@ name: Build app
 
 # Builds the Electron installers on every OS and, for tags `v*`, publishes them as a GitHub Release.
 #   Windows x64 (NSIS) | macOS arm64 + x64 (dmg) | Linux x64 (AppImage + deb)
-# Installers are unsigned (no certificates). electron-builder never publishes by itself (--publish never):
-# the app contains no update pings (privacy promise); releases are created by the `release` job below.
+# Each installer bundles the llama-server sidecar (vision + text inference) under resources/bin/<os>-<arch>/<variant>/.
+#
+# llama-server source (pinned llama.cpp tag = repo-root file LLAMA_CPP_TAG, fallback b11321):
+#   * default            : official release binaries via app/scripts/fetch-llama-server.mjs (sha256-verified)
+#   * llama_from_source  : build llama-server from source here (Vulkan + CPU on win/linux, Metal on mac arm64) so that
+#                          it is OUR build and can be signed (SignPath Foundation needs binaries built in CI).
+#                          Automatic when repository variable SIGNPATH_ENABLED=true.
+# Signing (Windows, Smart App Control): job `windows-signed`, disabled until SIGNPATH_ENABLED=true - see docs/signing.md.
+# Installers are otherwise unsigned. electron-builder never publishes (--publish never); there are no update pings.
 # NOTE: `macos-13` was retired by GitHub; Intel macs build on `macos-15-intel`.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      llama_from_source:
+        description: "Build llama-server from source (Vulkan/Metal) instead of using the official release binaries"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read     # only the `release` job gets contents: write
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # ------------------------------------------------------------------------------------------------------------
+  llama-source:
+    name: llama-server from source (${{ matrix.llama }})
+    if: ${{ inputs.llama_from_source == true || vars.SIGNPATH_ENABLED == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { llama: win-x64, os: windows-latest }
+          - { llama: linux-x64, os: ubuntu-latest }
+          - { llama: mac-arm64, os: macos-latest }
+          - { llama: mac-x64, os: macos-15-intel }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve llama.cpp tag (LLAMA_CPP_TAG file, fallback b11321)
+        run: echo "LLAMA_CPP_TAG=$(bash "$GITHUB_WORKSPACE/.github/scripts/llama_tag.sh" "" b11321)" | tee -a "$GITHUB_ENV"
+      - name: Get llama.cpp
+        run: git clone --depth 1 --branch "$LLAMA_CPP_TAG" https://github.com/ggml-org/llama.cpp src
+
+      - name: Vulkan SDK (Windows)
+        if: ${{ matrix.llama == 'win-x64' }}
+        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        with:
+          vulkan_version: latest
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - name: Vulkan headers + glslc (Linux)
+        if: ${{ matrix.llama == 'linux-x64' }}
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslc cmake ninja-build
+
+      - name: Configure
+        run: |
+          flags="-DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON"
+          case "${{ matrix.llama }}" in
+            win-x64)   flags="$flags -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF" ;;
+            linux-x64) flags="$flags -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_INSTALL_RPATH=\$ORIGIN" ;;
+            mac-arm64) flags="$flags -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_INSTALL_RPATH=@loader_path" ;;
+            mac-x64)   flags="$flags -DGGML_METAL=OFF -DGGML_NATIVE=OFF -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_INSTALL_RPATH=@loader_path" ;;
+          esac
+          cmake -S src -B build $flags
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Collect files into resources/bin/${{ matrix.llama }}/<variant>
+        run: |
+          out="stage/${{ matrix.llama }}"
+          bin="build/bin"; [ -d "build/bin/Release" ] && bin="build/bin/Release"
+          ls "$bin" | head -60
+          copy_runtime() {   # $1 = destination dir, $2 = "novulkan" to skip the Vulkan backend
+            mkdir -p "$1"
+            for f in "$bin"/llama-server* "$bin"/*.dll "$bin"/*.so "$bin"/*.so.* "$bin"/*.dylib; do
+              [ -e "$f" ] || continue
+              case "$f" in *ggml-vulkan*) [ "${2:-}" = "novulkan" ] && continue ;; esac
+              cp -P "$f" "$1/"
+            done
+            cp src/LICENSE "$1/LICENSE-llama.cpp.txt"
+          }
+          case "${{ matrix.llama }}" in
+            win-x64|linux-x64) copy_runtime "$out/vulkan"; copy_runtime "$out/cpu" novulkan ;;
+            mac-arm64)         copy_runtime "$out/metal" ;;
+            mac-x64)           copy_runtime "$out/default" ;;
+          esac
+          find "$out" -maxdepth 2 -name 'llama-server*' | sort
+          test -n "$(find "$out" -name 'llama-server*' -print -quit)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: llama-bin-${{ matrix.llama }}
+          path: stage
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------------------------------------------------
   build:
     name: build (${{ matrix.name }})
+    needs: llama-source
+    if: ${{ !cancelled() && (needs.llama-source.result == 'success' || needs.llama-source.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: windows-x64, os: windows-latest, args: "--win --x64" }
-          - { name: macos-arm64, os: macos-latest, args: "--mac --arm64" }
-          - { name: macos-x64, os: macos-15-intel, args: "--mac --x64" }
-          - { name: linux-x64, os: ubuntu-latest, args: "--linux --x64" }
+          - { name: windows-x64, llama: win-x64, os: windows-latest, args: "--win --x64" }
+          - { name: macos-arm64, llama: mac-arm64, os: macos-latest, args: "--mac --arm64" }
+          - { name: macos-x64, llama: mac-x64, os: macos-15-intel, args: "--mac --x64" }
+          - { name: linux-x64, llama: linux-x64, os: ubuntu-latest, args: "--linux --x64" }
     defaults:
       run:
         shell: bash
         working-directory: app
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"   # no code-signing certificates available
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"   # no code-signing certificates (Windows signing: see windows-signed)
       ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: "true"
     steps:
       - uses: actions/checkout@v7
@@ -46,8 +140,35 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Resolve llama.cpp tag (LLAMA_CPP_TAG file, fallback b11321)
+        run: echo "LLAMA_CPP_TAG=$(bash "$GITHUB_WORKSPACE/.github/scripts/llama_tag.sh" "" b11321)" | tee -a "$GITHUB_ENV"
+
+      - name: llama-server - our own build
+        if: ${{ needs.llama-source.result == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: llama-bin-${{ matrix.llama }}
+          path: app/resources/bin
+
+      - name: llama-server - official release binaries (sha256-verified; tag from LLAMA_CPP_TAG)
+        if: ${{ needs.llama-source.result != 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/fetch-llama-server.mjs --platform ${{ matrix.llama }} --verify
+
+      - name: Assert llama-server is bundled (fail the build otherwise)
         run: |
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          find resources/bin -name 'llama-server*' | sort
+          test -n "$(find resources/bin/${{ matrix.llama }} -name 'llama-server*' -print -quit)" \
+            || { echo "::error::llama-server missing for ${{ matrix.llama }} - installer would have no inference engine"; exit 1; }
 
       - name: Build (electron-vite)
         run: npm run build
@@ -56,45 +177,131 @@ jobs:
         run: npx electron-builder ${{ matrix.args }} --publish never
 
       - name: List output
-        run: |
-          for d in dist release; do [ -d "$d" ] && ls -la "$d"; done || true
+        run: for d in release dist; do [ -d "$d" ] && ls -la "$d"; done || true
 
       - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.name }}
           if-no-files-found: error
           path: |
-            app/dist/*.exe
-            app/dist/*.dmg
-            app/dist/*.AppImage
-            app/dist/*.deb
             app/release/*.exe
             app/release/*.dmg
             app/release/*.AppImage
             app/release/*.deb
+            app/dist/*.exe
+            app/dist/*.dmg
+            app/dist/*.AppImage
+            app/dist/*.deb
 
+  # ------------------------------------------------------------------------------------------------------------
+  # Windows code signing through SignPath Foundation (free for OSI-licensed projects). DISABLED until the repository
+  # variable SIGNPATH_ENABLED is set to "true" (+ secrets/vars below). Flow: unpacked app -> sign every exe/dll/node
+  # -> installer built from the signed files -> sign the installer. Details: docs/signing.md
+  windows-signed:
+    name: Windows signed installer (SignPath)
+    needs: llama-source
+    if: ${{ !cancelled() && vars.SIGNPATH_ENABLED == 'true' && needs.llama-source.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Typecheck + unit tests
+        run: npm run typecheck && npm test
+      - uses: actions/download-artifact@v8
+        with:
+          name: llama-bin-win-x64
+          path: app/resources/bin
+      - name: Assert llama-server is bundled
+        run: test -n "$(find resources/bin/win-x64 -name 'llama-server*' -print -quit)" || { echo "::error::no llama-server in the signed build"; exit 1; }
+      - name: Build + unpacked app (no installer yet)
+        run: |
+          npm run build
+          npx electron-builder --win --x64 --dir --publish never
+          cd release && 7z a -tzip ../unsigned-app.zip win-unpacked/ >/dev/null
+      - id: up1
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-win-app
+          path: app/unsigned-app.zip
+      - name: Sign app files (exe, dll, node)
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: win-unpacked-app
+          github-artifact-id: ${{ steps.up1.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: app/signed-app
+      - name: Installer from the signed app
+        run: |
+          rm -rf release/win-unpacked && mkdir -p release
+          7z x signed-app/*.zip -orelease >/dev/null
+          npx electron-builder --win --x64 --prepackaged release/win-unpacked --publish never
+          cd release && 7z a -tzip ../unsigned-installer.zip Rico-Setup-*.exe >/dev/null
+      - id: up2
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-win-installer
+          path: app/unsigned-installer.zip
+      - name: Sign installer
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: win-installer
+          github-artifact-id: ${{ steps.up2.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: app/signed-installer
+      - run: cd signed-installer && 7z x *.zip >/dev/null && ls -la
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-windows-x64-signed
+          if-no-files-found: error
+          path: app/signed-installer/*.exe
+
+  # ------------------------------------------------------------------------------------------------------------
   release:
     name: GitHub Release
-    needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: [build, windows-signed]
+    if: ${{ !cancelled() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write    # the ONLY job that may publish
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: installer-*
           path: release-files
-          merge-multiple: true
+          merge-multiple: false
 
-      - name: Checksums
-        working-directory: release-files
+      - name: Collect (prefer the signed Windows installer) + checksums
         run: |
-          ls -la
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          mkdir out
+          if [ -d release-files/installer-windows-x64-signed ]; then rm -rf release-files/installer-windows-x64; fi
+          find release-files -type f -exec cp {} out/ \;
+          cd out && ls -la && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v3
         with:
-          files: release-files/*
+          files: out/*
           generate_release_notes: true
           fail_on_unmatched_files: true
           prerelease: ${{ contains(github.ref_name, '-') }}

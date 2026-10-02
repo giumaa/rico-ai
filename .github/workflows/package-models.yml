@@ -1,9 +1,13 @@
 name: Package models
 
 # Downloads the upstream Q4_K_M GGUF of each tier (models/catalog.json -> source), stamps it with Rico metadata
-# (general.name / general.author + persona as default system prompt in the chat template), splits it into
-# <=1900 MB shards, copies the (unmodified) vision projector `<tier>-mmproj-F16.gguf`, uploads both to the `models-v1` release and commits the real shard names/sizes/sha256
-# back into models/catalog.json.   NOTE: the repo must be PUBLIC for end users to download release assets.
+# (general.name / general.author + a short stable identity line as default system prompt in the chat template - the
+# full persona is injected by the app), splits it into <=1900 MB shards (names carry a content revision), copies the
+# (unmodified) vision projector `<tier>-mmproj-<sha8>-F16.gguf`, uploads both to the release and commits the real shard
+# names/sizes/sha256 back into models/catalog.json.
+# Release assets are IMMUTABLE: shipped apps embed their sha256, so nothing is ever overwritten (no --clobber; an
+# existing name with different bytes fails the job).  `models-v1` is FROZEN (the shipped catalog points at it) - new
+# packs go to `models-v2` (default) or a newer tag.   NOTE: the repo must be PUBLIC for end users to download assets.
 
 on:
   workflow_dispatch:
@@ -13,8 +17,8 @@ on:
         default: "rico-lite,rico,rico-max"
         required: true
       release_tag:
-        description: "Release tag that hosts the model shards"
-        default: "models-v1"
+        description: "Release tag that hosts the model shards (models-v1 is frozen and refused)"
+        default: "models-v2"
         required: true
       commit_catalog:
         description: "Commit the updated models/catalog.json to the default branch"
@@ -25,8 +29,8 @@ on:
         type: boolean
         default: false
       llama_cpp_tag:
-        description: "llama.cpp release used for llama-gguf-split / llama-server"
-        default: "b11312"
+        description: "llama.cpp release for llama-gguf-split / llama-server (empty = LLAMA_CPP_TAG file, fallback b11312)"
+        default: ""
 
 permissions:
   contents: write
@@ -36,8 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  LLAMA_CPP_TAG: ${{ inputs.llama_cpp_tag || 'b11312' }}
-  RELEASE_TAG: ${{ inputs.release_tag || 'models-v1' }}
+  RELEASE_TAG: ${{ inputs.release_tag || 'models-v2' }}
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
 
@@ -58,6 +61,9 @@ jobs:
           echo "$matrix"
       - name: Ensure release ${{ env.RELEASE_TAG }} exists
         run: |
+          if [ "$RELEASE_TAG" = "models-v1" ]; then
+            echo "::error::models-v1 is frozen (shipped apps reference its assets by sha256). Use models-v2 or a newer tag."; exit 1
+          fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "release exists"
           else
@@ -86,7 +92,12 @@ jobs:
       - name: Install Python deps
         run: python -m pip install --quiet gguf jinja2
 
-      - name: Fetch llama.cpp ${{ env.LLAMA_CPP_TAG }} (linux x64, CPU)
+      - name: Resolve llama.cpp tag (input > LLAMA_CPP_TAG file > b11312)
+        env:
+          TAG_OVERRIDE: ${{ inputs.llama_cpp_tag }}
+        run: echo "LLAMA_CPP_TAG=$(bash .github/scripts/llama_tag.sh "$TAG_OVERRIDE" b11312)" | tee -a "$GITHUB_ENV"
+
+      - name: Fetch llama.cpp (linux x64, CPU)
         run: |
           mkdir -p "$RUNNER_TEMP/llama"
           curl -fsSL --retry 5 -o "$RUNNER_TEMP/llama.tgz" \
@@ -107,20 +118,14 @@ jobs:
         if: ${{ !inputs.skip_server_check }}
         timeout-minutes: 25
         run: |
-          first=$(ls "$HOME/rico-out/${{ matrix.tier }}-Q4_K_M-00001-of-"*.gguf | head -n1)
-          python ml/package_model.py server-check --gguf "$first" --llama-bin "$LLAMA_BIN" --timeout 1200             --mmproj "$HOME/rico-out/${{ matrix.tier }}-mmproj-F16.gguf"
+          first=$(ls "$HOME/rico-out/${{ matrix.tier }}"-*-Q4_K_M-00001-of-*.gguf | head -n1)
+          python ml/package_model.py server-check --gguf "$first" --llama-bin "$LLAMA_BIN" --timeout 1200             --mmproj "$(ls $HOME/rico-out/${{ matrix.tier }}-mmproj-*-F16.gguf | head -n1)"
 
-      - name: Upload shards to release ${{ env.RELEASE_TAG }}
+      - name: Upload shards + mmproj to release ${{ env.RELEASE_TAG }} (never overwrites an existing name)
         run: |
           shopt -s nullglob
-          files=("$HOME/rico-out/${{ matrix.tier }}-Q4_K_M-"*.gguf "$HOME/rico-out/${{ matrix.tier }}-mmproj-F16.gguf")
-          printf '%s\n' "${files[@]##*/}" | sort > "$RUNNER_TEMP/new_assets.txt"
-          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
-          # delete stale shards of this tier (e.g. an older split with a different shard count)
-          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | grep "^${{ matrix.tier }}-Q4_K_M-" | sort > "$RUNNER_TEMP/all_assets.txt" || true
-          comm -13 "$RUNNER_TEMP/new_assets.txt" "$RUNNER_TEMP/all_assets.txt" | while read -r old; do
-            echo "deleting stale asset $old"; gh release delete-asset "$RELEASE_TAG" "$old" -y
-          done
+          files=("$HOME/rico-out/${{ matrix.tier }}"-*-Q4_K_M-*.gguf "$HOME/rico-out/${{ matrix.tier }}-mmproj-"*-F16.gguf)
+          bash .github/scripts/upload_assets.sh "$RELEASE_TAG" "${files[@]}"
 
       - name: Upload catalog patch artifact
         uses: actions/upload-artifact@v7

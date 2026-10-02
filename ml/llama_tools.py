@@ -1,13 +1,14 @@
 """Fetch pinned llama.cpp pieces (convert_hf_to_gguf.py source tree + prebuilt binaries) for GGUF export.
 
 Used by ml/train_lora.py and the Kaggle notebook. CI workflows download the same pinned release themselves.
-Keep LLAMA_TAG in sync with `LLAMA_CPP_TAG` in .github/workflows/*.yml.
+The tag comes from the repo-root `LLAMA_CPP_TAG` file (or env LLAMA_CPP_TAG), like the CI workflows.
 """
 from __future__ import annotations
 
 import io
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,21 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-LLAMA_TAG = "b11312"
+def _read_tag(default: str = "b11312") -> str:
+    """env LLAMA_CPP_TAG > repo-root file LLAMA_CPP_TAG (shared with the app and the CI workflows) > default."""
+    env = os.environ.get("LLAMA_CPP_TAG", "").strip()
+    if re.fullmatch(r"b\d+", env):
+        return env
+    f = Path(__file__).resolve().parents[1] / "LLAMA_CPP_TAG"
+    if f.exists():
+        for line in f.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line if re.fullmatch(r"b\d+", line) else default
+    return default
+
+
+LLAMA_TAG = _read_tag()
 _REL = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_TAG}"
 
 
