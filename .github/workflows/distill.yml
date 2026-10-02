@@ -92,6 +92,28 @@ jobs:
             ml/data/recent/ATTRIBUTION.md
           if-no-files-found: error
 
+  teacher-cache:
+    # Download the teacher ONCE (HF) and cache it; the 20 generate jobs restore it from the Actions cache instead of
+    # hitting Hugging Face concurrently. (Repo cache quota is 10 GB; the 7.4 GB teacher fits.)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - id: c
+        uses: actions/cache@v6
+        with:
+          path: teacher-cache/teacher.gguf
+          key: teacher-v1-${{ inputs.teacher_sha256 || inputs.teacher_url }}
+      - name: Download teacher (cache miss)
+        if: ${{ steps.c.outputs.cache-hit != 'true' }}
+        env:
+          TEACHER_URL: ${{ inputs.teacher_url }}
+          TEACHER_SHA: ${{ inputs.teacher_sha256 }}
+        run: |
+          mkdir -p teacher-cache
+          curl -fL --retry 8 --retry-delay 5 --retry-all-errors -C - -o teacher-cache/teacher.gguf "$TEACHER_URL"
+          ls -la teacher-cache
+          if [ -n "$TEACHER_SHA" ]; then echo "$TEACHER_SHA  teacher-cache/teacher.gguf" | sha256sum -c -; fi
+
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -107,7 +129,7 @@ jobs:
           echo "matrix=$(jq -nc --argjson n "$n" '{shard: [range(0;$n)]}')" >> "$GITHUB_OUTPUT"
 
   generate:
-    needs: [collect, prepare]
+    needs: [collect, prepare, teacher-cache]
     if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.collect.result == 'success' || needs.collect.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 345
@@ -151,15 +173,32 @@ jobs:
           tar -xzf "$RUNNER_TEMP/llama.tgz" -C "$RUNNER_TEMP/llama"
           echo "LLAMA_BIN=$RUNNER_TEMP/llama/llama-${LLAMA_CPP_TAG}" >> "$GITHUB_ENV"
 
-      - name: Download teacher model
+      - name: Restore teacher from cache
+        id: tc
+        uses: actions/cache/restore@v6
+        with:
+          path: teacher-cache/teacher.gguf
+          key: teacher-v1-${{ inputs.teacher_sha256 || inputs.teacher_url }}
+
+      - name: Teacher model (download only if the cache missed)
         env:
           TEACHER_URL: ${{ inputs.teacher_url }}
           TEACHER_SHA: ${{ inputs.teacher_sha256 }}
+          CACHE_HIT: ${{ steps.tc.outputs.cache-hit }}
         run: |
-          curl -fL --retry 8 --retry-delay 5 --retry-all-errors -C - -o "$RUNNER_TEMP/teacher.gguf" "$TEACHER_URL"
-          ls -la "$RUNNER_TEMP/teacher.gguf"
-          if [ -n "$TEACHER_SHA" ]; then echo "$TEACHER_SHA  $RUNNER_TEMP/teacher.gguf" | sha256sum -c -; fi
-          echo "TEACHER_GGUF=$RUNNER_TEMP/teacher.gguf" >> "$GITHUB_ENV"
+          f="teacher-cache/teacher.gguf"
+          if [ "$CACHE_HIT" != "true" ]; then
+            mkdir -p teacher-cache
+            sleep $(( SHARD * 6 ))      # stagger the 20 jobs so Hugging Face does not throttle us
+            for attempt in 1 2 3; do
+              curl -fL --retry 8 --retry-delay 10 --retry-all-errors -C - -o "$f" "$TEACHER_URL" && break
+              echo "download attempt $attempt failed"; sleep 30
+            done
+          fi
+          ls -la "$f"
+          if [ -n "$TEACHER_SHA" ]; then echo "$TEACHER_SHA  $f" | sha256sum -c -; fi
+          echo "TEACHER_GGUF=$GITHUB_WORKSPACE/$f" >> "$GITHUB_ENV"
+          free -m | sed -n 1,3p; nproc; lscpu | grep -E "Model name|Flags" | cut -c1-160 | head -2
 
       - name: Generate - chunk 1
         continue-on-error: true
@@ -197,9 +236,22 @@ jobs:
           overwrite: true
           if-no-files-found: warn
 
-      - name: Server log (tail)
+      - name: Server + memory logs (tail)
         if: always()
-        run: tail -n 30 "$RUNNER_TEMP/llama-server.log" || true
+        run: |
+          echo "--- llama-server.log"; tail -n 25 "$RUNNER_TEMP/llama-server.log" || true
+          echo "--- mem.log"; tail -n 12 "$RUNNER_TEMP/mem.log" || true
+          grep -c GUARD "$RUNNER_TEMP/mem.log" || true
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: distill-logs-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/llama-server.log
+            ${{ runner.temp }}/mem.log
+          retention-days: 7
+          if-no-files-found: ignore
 
   merge:
     needs: generate

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -65,18 +66,63 @@ def http_json(url: str, body: dict | None = None, timeout: float = 1200) -> dict
         return json.loads(r.read().decode("utf-8"))
 
 
-def wait_for_server(base: str, minutes: float) -> None:
+def tail_file(path: str | None, n: int = 40) -> str:
+    try:
+        if path and Path(path).exists():
+            return "\n".join(Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[-n:])
+    except OSError:
+        pass
+    return "(no server log available)"
+
+
+def server_ok(base: str, timeout: float = 5) -> bool:
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def wait_for_server(base: str, minutes: float, server_log: str | None = None) -> None:
     deadline = time.time() + minutes * 60
+    last_note = 0.0
     while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(base + "/health", timeout=5) as r:
-                if r.status == 200:
-                    log("server is healthy")
-                    return
-        except Exception:
-            pass
+        if server_ok(base):
+            log("server is healthy")
+            return
+        if time.time() - last_note > 60:
+            last_note = time.time()
+            log(f"waiting for {base}/health ... (server log tail below)\n{tail_file(server_log, 5)}")
         time.sleep(5)
-    raise SystemExit(f"server at {base} not healthy after {minutes} min")
+    raise SystemExit(f"server at {base} not healthy after {minutes} min\n--- llama-server log ---\n"
+                     + tail_file(server_log, 60))
+
+
+def server_metrics(base: str) -> str:
+    """Best-effort one-liner from llama-server /metrics (needs --metrics)."""
+    try:
+        with urllib.request.urlopen(base + "/metrics", timeout=5) as r:
+            txt = r.read().decode("utf-8", "replace")
+        vals = {}
+        for line in txt.splitlines():
+            if line.startswith("llamacpp:") and " " in line and not line.startswith("#"):
+                k, v = line.split(" ", 1)
+                vals[k.replace("llamacpp:", "")] = v.strip()
+        keys = ("prompt_tokens_seconds", "predicted_tokens_seconds", "requests_processing", "requests_deferred")
+        return " ".join(f"{k.split('_')[0] if 'tokens' in k else k}={vals.get(k, '?')}" for k in keys)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def mem_line() -> str:
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, v = line.split(":", 1)
+            info[k] = int(v.split()[0]) // 1024
+        return f"mem avail={info.get('MemAvailable', '?')}MB swapfree={info.get('SwapFree', '?')}MB"
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def load_prompts(path: Path) -> list[tuple[str, str, dict]]:
@@ -179,7 +225,31 @@ def cmd_generate(a: argparse.Namespace) -> None:
         log("nothing to do")
         return
     base = a.server.rstrip("/")
-    wait_for_server(base, a.wait_minutes)
+    wait_for_server(base, a.wait_minutes, a.server_log)
+    if not a.no_warmup:   # fill the persona/few-shot prefix cache once before the parallel workers start
+        t0 = time.time()
+        try:
+            http_json(base + "/v1/chat/completions", {
+                "model": "teacher", "messages": build_messages(persona, fewshots, "مرحبا"), "max_tokens": 4,
+                "temperature": 0, "cache_prompt": True, "chat_template_kwargs": {"enable_thinking": False}},
+                timeout=a.warmup_timeout)
+            log(f"warm-up (prefix prefill) took {time.time() - t0:.0f}s")
+        except Exception as exc:  # noqa: BLE001
+            log(f"warm-up failed ({exc}); continuing")
+
+    stop_monitor = threading.Event()
+
+    def monitor() -> None:
+        """If /health stays down for ~90 s (server crashed / killed by the memory guard), run --restart-cmd."""
+        down = 0
+        while not stop_monitor.wait(30):
+            down = 0 if server_ok(base, 10) else down + 1
+            if down >= 3 and a.restart_cmd:
+                log(f"server unhealthy for ~90 s -> restarting: {a.restart_cmd}\n{tail_file(a.server_log, 15)}")
+                subprocess.run(a.restart_cmd, shell=True, check=False)
+                down = 0
+
+    threading.Thread(target=monitor, daemon=True).start()
 
     t_start = time.time()
     deadline = t_start + a.budget_minutes * 60
@@ -204,7 +274,7 @@ def cmd_generate(a: argparse.Namespace) -> None:
             body["messages"] = build_messages(persona, fewshots, prompt)
             body["max_tokens"] = a.max_tokens
         last_err = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 resp = http_json(base + "/v1/chat/completions", body, timeout=a.request_timeout)
                 ch = resp["choices"][0]
@@ -228,7 +298,7 @@ def cmd_generate(a: argparse.Namespace) -> None:
                 return
             except (urllib.error.URLError, TimeoutError, ConnectionError, KeyError, ValueError) as exc:
                 last_err = exc
-                time.sleep(5 * (attempt + 1))
+                time.sleep(min(60, 10 * (attempt + 1)))
         with lock:
             stats["failed"] += 1
         log(f"giving up on {rid}: {last_err}")
@@ -254,10 +324,12 @@ def cmd_generate(a: argparse.Namespace) -> None:
                 last_report = time.time()
                 el = time.time() - t_start
                 log(f"ok={stats['ok']} failed={stats['failed']} tokens={stats['tokens']} "
-                    f"({stats['tokens'] / max(el, 1):.1f} tok/s agg) elapsed={el / 60:.1f} min")
+                    f"({stats['tokens'] / max(el, 1):.1f} tok/s agg) inflight={len(pending)} "
+                    f"elapsed={el / 60:.1f} min | {server_metrics(base)} {mem_line()}")
             if time.time() > deadline + a.grace_minutes * 60:
                 log("grace period over - abandoning in-flight requests")
                 break
+    stop_monitor.set()
     fh.close()
     log(f"finished chunk: ok={stats['ok']} failed={stats['failed']} remaining~={len(todo) - stats['ok']}")
 
@@ -471,7 +543,7 @@ def cmd_selftest(a: argparse.Namespace) -> None:
         for shard in range(2):
             ns = argparse.Namespace(
                 prompts=str(td_p / "prompts.jsonl"), articles=str(td_p / "articles.jsonl"), qa_per_chunk=3,
-                qa_chunk_chars=1400, max_chunks_per_article=2, qa_samples=1, qa_max_tokens=900, out=str(td_p / "shards" / f"s{shard}.jsonl"), shard=shard,
+                qa_chunk_chars=1400, max_chunks_per_article=2, qa_samples=1, qa_max_tokens=900, server_log=None, restart_cmd=None, no_warmup=False, warmup_timeout=60, out=str(td_p / "shards" / f"s{shard}.jsonl"), shard=shard,
                 num_shards=2, server=base, persona=None, fewshots=None, max_fewshots=5, budget_minutes=1,
                 grace_minutes=1, wait_minutes=1, parallel=3, temperature=0.7, max_tokens=500, request_timeout=30,
                 teacher_name="mock", also_done=None, samples=1)
@@ -523,7 +595,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--budget-minutes", type=float, default=100, help="stop submitting new prompts after this")
     g.add_argument("--grace-minutes", type=float, default=12, help="how long to wait for in-flight requests")
     g.add_argument("--wait-minutes", type=float, default=20, help="how long to wait for /health")
-    g.add_argument("--request-timeout", type=float, default=900)
+    g.add_argument("--request-timeout", type=float, default=2400,
+                   help="CPU prompt processing is slow (~10 tok/s on 4 vCPU): allow long first-token latency")
+    g.add_argument("--server-log", default=None, help="llama-server log file (tail shown on errors)")
+    g.add_argument("--restart-cmd", default=None, help="shell command that (re)starts the server if it dies")
+    g.add_argument("--no-warmup", action="store_true")
+    g.add_argument("--warmup-timeout", type=float, default=1800)
     g.add_argument("--teacher-name", default="gemma-4-12B-it-Q4_K_M")
     g.add_argument("--also-done", nargs="*", help="extra jsonl files whose ids must be skipped")
 
