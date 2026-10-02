@@ -1,0 +1,19 @@
+# Normalise line endings: the repo stores LF; code/scripts are checked out as LF on every OS (a CRLF checkout on the
+# Windows runner broke script parsing).
+* text=auto
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.woff2 binary
+*.png binary
+*.ico binary
+*.icns binary
+*.gguf binary

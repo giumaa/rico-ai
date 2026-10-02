@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Downloads the official llama.cpp release binaries (llama-server) that Rico runs as its inference sidecar,
 // and unpacks them into app/resources/bin/<os>-<arch>/<variant>/  (os = win | mac | linux, as electron-builder's ${os}).
 //
@@ -139,7 +138,11 @@ export function shouldKeep(name, serverExe) {
   if (n === serverExe) return true;
   if (/^license|\.txt$|\.md$|^\.rico-/.test(n)) return true;
   if (/^(llama|rpc-server|ggml-rpc-server)(\.exe)?$/.test(n)) return false; // unified CLI / RPC server executables
-  if (n.includes('ggml-rpc')) return false; // the RPC backend is network code: not shipped
+  // macOS/Linux: llama-server is LINKED against its shared libraries (incl. libggml-rpc: dyld looks for
+  // @rpath/libggml-rpc.0.dylib), so every lib*.dylib / lib*.so* (and the versioned symlinks) must stay.
+  if (/[.](dylib|so)([.][0-9.]+)?$/.test(n)) return true;
+  // Windows: the RPC backend is a dlopen'ed plugin (ggml-rpc.dll) with network code: not shipped.
+  if (n.includes('ggml-rpc')) return false;
   if (n.endsWith('.exe') || n.startsWith('test-')) return false;
   if (TOOL_WORDS.test(n) && !n.includes('server')) return false; // llama-cli / bench / quantize ... and their *-impl libraries
   return true;

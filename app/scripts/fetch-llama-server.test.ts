@@ -20,6 +20,11 @@ describe('fetch-llama-server prune rules', () => {
     }
     expect(shouldKeep('llama-cli', 'llama-server')).toBe(false);
     expect(shouldKeep('llama-quantize', 'llama-server')).toBe(false);
-    expect(shouldKeep('libggml-rpc.so', 'llama-server')).toBe(false);
+    // ...but on macOS/Linux the sidecar is linked against libggml-rpc, so shared libraries are never pruned
+    expect(shouldKeep('libggml-rpc.so', 'llama-server')).toBe(true);
+    expect(shouldKeep('libggml-rpc.0.dylib', 'llama-server')).toBe(true);
+    expect(shouldKeep('libggml-rpc.0.9.4.dylib', 'llama-server')).toBe(true);
+    expect(shouldKeep('libllama.so.0', 'llama-server')).toBe(true);
+    expect(shouldKeep('rpc-server', 'llama-server')).toBe(false);
   });
 });
