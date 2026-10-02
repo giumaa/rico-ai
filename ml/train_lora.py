@@ -320,7 +320,7 @@ def load_hf_model(repo: str, dtype, quant_cfg=None, device_map=None, loader: str
             errors.append(f"{cls_name}: not available in transformers {transformers.__version__}")
             continue
         try:
-            kw: dict[str, Any] = dict(**_dtype_kw(dtype), trust_remote_code=False)
+            kw: dict[str, Any] = dict(_dtype_kw(dtype))
             if quant_cfg is not None:
                 kw["quantization_config"] = quant_cfg
             if device_map is not None:
@@ -331,9 +331,7 @@ def load_hf_model(repo: str, dtype, quant_cfg=None, device_map=None, loader: str
             return model
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{cls_name}: {exc}")
-    raise RuntimeError("could not load " + repo + ":
-  " + "
-  ".join(errors))
+    raise RuntimeError("could not load " + repo + ":\n  " + "\n  ".join(errors))
 
 
 META_NAME = "rico_meta.json"
@@ -352,8 +350,7 @@ def write_adapter_meta(adapter: Path, args: argparse.Namespace, model, engine: s
         "lora_modules": len(adapter_module_names(adapter)), "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
         "transformers": transformers.__version__, "peft": peft.__version__,
     }
-    (adapter / META_NAME).write_text(json.dumps(meta, indent=2) + "
-", encoding="utf-8")
+    (adapter / META_NAME).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     log(f"wrote {adapter / META_NAME}: loader={meta['loader']} base_class={meta['base_class']} base={meta['base']}")
     return meta
 
